@@ -15,10 +15,7 @@ class ElementFinder(nn.Module):
             DynamicTanh(dim), nn.Linear(dim, 2)  # 2 classes: clickable and scrollable
         )
 
-    def forward(
-        self,
-        images: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
         x = self.model(images)
         logits = self.head(x)
         logits = logits[:, self.num_special_tokens :]

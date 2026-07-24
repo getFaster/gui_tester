@@ -216,8 +216,8 @@ class ProccessedDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         feature_path = self.feature_dir / f"feature_{self.samples[index]}.pt"
         target_path = self.target_dir / f"target_{self.samples[index]}.pt"
-        feature = torch.load(feature_path)
-        target = torch.load(target_path)
+        feature = torch.load(feature_path, map_location=torch.device("cpu")).squeeze(0)
+        target = torch.load(target_path, map_location=torch.device("cpu")).squeeze(0)
         return feature, target
 
 

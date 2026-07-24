@@ -18,7 +18,6 @@ if __name__ == "__main__" and not sys.flags.utf8_mode:
 
 import torch
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
@@ -36,8 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss-sub-batch-size",
         type=int,
-        default=4,
-        help="Number of ragged feature sequences padded and forwarded together.",
+        default=8,
+        help="Maximum number of equal-length feature sequences forwarded together.",
     )
     parser.add_argument(
         "--val-size",
@@ -66,44 +65,76 @@ def batch_loss(
     sub_batch_size: int,
     backward: bool,
 ) -> float:
-    """Compute one equally weighted loss per screenshot in a ragged batch."""
+    """Compute one equally weighted loss per screenshot in a ragged batch.
+
+    Samples are grouped by token count so every model forward receives a dense,
+    unpadded tensor.
+    """
     if len(features) != len(targets):
         raise ValueError(
             "features and targets must contain the same number of samples, got "
             f"{len(features)} and {len(targets)}."
         )
+    if not features:
+        raise ValueError("features and targets must not be empty.")
     if sub_batch_size < 1:
         raise ValueError("sub_batch_size must be positive.")
     if not isinstance(loss_fn, torch.nn.BCEWithLogitsLoss):
         raise TypeError("batch_loss requires BCEWithLogitsLoss.")
+    if loss_fn.reduction != "mean":
+        raise ValueError("batch_loss requires BCEWithLogitsLoss reduction='mean'.")
 
     num_special_tokens = model.num_special_tokens
-    cumulative_loss = 0.0
     batch_size = len(features)
-    for start in range(0, batch_size, sub_batch_size):
-        feature_chunk = features[start : start + sub_batch_size]
-        target_chunk = targets[start : start + sub_batch_size]
-        embedding_dim = feature_chunk[0].shape[-1]
+    embedding_dim = features[0].shape[-1]
+    groups: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
+    for sample_index, (feature, target) in enumerate(
+        zip(features, targets, strict=True)
+    ):
+        if feature.ndim != 2 or feature.shape[-1] != embedding_dim:
+            raise ValueError(
+                "Every feature must have shape (tokens, embedding_dim); "
+                f"sample {sample_index} has shape {tuple(feature.shape)}."
+            )
+        expected_targets = feature.shape[0] - num_special_tokens
+        if target.ndim != 2 or target.shape[0] != expected_targets:
+            raise ValueError(
+                "Each target must have one row per patch token; "
+                f"sample {sample_index} has {feature.shape[0]} feature tokens "
+                f"and target shape {tuple(target.shape)}, expected "
+                f"({expected_targets}, classes)."
+            )
+        groups.setdefault(feature.shape[0], []).append((feature, target))
 
-        feature_lengths = torch.tensor(
-            [feature.shape[0] for feature in feature_chunk],
-            dtype=torch.long,
-            device=device,
-        )
-        padded_features = pad_sequence(
-            [feature.to(device) for feature in feature_chunk], batch_first=True
-        )
-        padded_targets = pad_sequence(
-            [target.to(device) for target in target_chunk], batch_first=True
-        )
-        patch_logits = model(padded_features)
+    cumulative_loss = torch.zeros((), device=device)
+    for group in groups.values():
+        for start in range(0, len(group), sub_batch_size):
+            chunk = group[start : start + sub_batch_size]
+            feature_chunk, target_chunk = zip(*chunk, strict=True)
+            stacked_features = torch.stack(feature_chunk).to(device)
+            stacked_targets = torch.stack(target_chunk).to(device)
+            patch_logits = model(stacked_features)
 
-        # TODO: calculate chunk_loss
-        if backward:
-            chunk_loss.backward()
-        cumulative_loss += sample_loss.detach().sum().item()
+            if patch_logits.shape != stacked_targets.shape:
+                raise ValueError(
+                    "Patch logits and targets must have the same shape, got "
+                    f"{tuple(patch_logits.shape)} and "
+                    f"{tuple(stacked_targets.shape)}."
+                )
+            element_loss = F.binary_cross_entropy_with_logits(
+                patch_logits,
+                stacked_targets,
+                weight=loss_fn.weight,
+                pos_weight=loss_fn.pos_weight,
+                reduction="none",
+            )
+            sample_loss = element_loss.mean(dim=(1, 2))
+            chunk_loss = sample_loss.sum() / batch_size
+            if backward:
+                chunk_loss.backward()
+            cumulative_loss += sample_loss.detach().sum()
 
-    return cumulative_loss / batch_size
+    return (cumulative_loss / batch_size).item()
 
 
 def make_checkpoint(

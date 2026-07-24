@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, cast
+from typing import cast
 import torch as th
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention
@@ -83,7 +83,12 @@ class AttentionLayer(th.nn.Module):
 
         self.MHA = th.compile(
             lambda q, k, v: flex_attention(  # QKNorm use scale=1.0
-                q, k, v, score_mod=soft_cap, scale=1.0, enable_gqa=False
+                q,
+                k,
+                v,
+                score_mod=soft_cap,
+                scale=1.0,
+                enable_gqa=False,
             ),
             mode="reduce-overhead",
         )
@@ -92,8 +97,6 @@ class AttentionLayer(th.nn.Module):
 
     def forward(self, x):
         x_prime = self.norm1(x)
-        # ensure x_prime is 3D tensor for flex_attention
-        x_prime = x_prime.view(-1, x.size(-2), x.size(-1))
         batch_size, seq_len, embedding_dim = x_prime.shape
 
         q, k, v = self.Q(x_prime), self.K(x_prime), self.V(x_prime)
@@ -129,11 +132,15 @@ class AttentionLayer(th.nn.Module):
 
 
 class Encoder(th.nn.Module):
-    def __init__(self, embedding_dim: int, num_layers: int = 2):
+    def __init__(self, embedding_dim: int, num_layers: int = 2, num_heads: int = 6):
         super(Encoder, self).__init__()
+        self.num_heads = num_heads
         self.model = th.nn.Sequential(
             OrderedDict(
-                {f"layer_{i}": AttentionLayer(embedding_dim) for i in range(num_layers)}
+                {
+                    f"layer_{i}": AttentionLayer(embedding_dim, num_heads)
+                    for i in range(num_layers)
+                }
             )
         )
 
