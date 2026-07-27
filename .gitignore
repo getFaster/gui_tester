@@ -9,18 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-# AMEX dataset
-screenshot/
-element_anno/
-instruction_anno/
-feature/
-target/
+# dataset
+data/*
 
 # Training artifacts
-runs/
-checkpoints/
-
-# State-abstraction experiment artifacts
-state_features/
-state_clusters/
-state_annotations/
+*/runs/
+*/checkpoints/

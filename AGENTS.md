@@ -1,44 +1,73 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Scope
 
-This Python 3.13/PyTorch project trains a patch-level GUI element classifier.
+This Python 3.13/PyTorch repository has two related workflows:
 
-- `train.py` is the training entry point for validation, logging, and checkpoints.
-- `amex_dataset.py` loads AMEX screenshots and annotations and builds patch masks.
-- `dinov3.py` wraps DINOv3 feature extraction.
-- `element_finder.py` defines the element-classification model.
-- `network.py` contains reusable neural-network layers.
-- `screenshot/` and `element_anno/` are expected dataset inputs. `image_data/` contains local sample images.
-- `feature/`, `target/`, `runs/`, and `checkpoints/` are generated artifacts and are ignored by Git.
+1. Train and run a patch-level GUI element classifier on AMEX screenshots.
+2. Extract features from DroidBot observation runs, cluster UI states, annotate
+   functional states, and benchmark automatic state abstractions.
 
-Place new tests in `tests/` and mirror module names, for example `tests/test_amex_dataset.py`.
+The DroidBot crawler and collector live in the separate `droidbot` repository.
+This repository consumes completed collector run directories; do not add
+crawler behavior or Android-device control here.
 
-## Build, Test, and Development Commands
+## Project Structure
 
-Dependencies are managed by `uv` and pinned in `uv.lock`.
+- `element_finder/` contains the element-classification model and training code.
+- `tests/` contains the focused `unittest` suite. Mirror module names when
+  adding tests, for example `tests/test_state_dataset.py`.
+- `state_cluster/` contains the state-dataset feature extraction, clustering,
+  annotation, and benchmarking code.
+- `data/` is the ignored subdirectory for screenshots, annotations, extracted
+  features, checkpoints, TensorBoard logs, and state-dataset artifacts.
+
+## Environment and Commands
+
+Dependencies are managed by `uv` and pinned in `uv.lock`. Use the project
+environment for all runtime checks because system Python may not contain the
+required CUDA and FlexAttention packages.
 
 ```powershell
 uv sync
-uv run python main.py --help
-uv run python main.py --epochs 1 --batch-size 2
+uv run python -m unittest discover -s tests -v
 uv run python -m compileall .
 ```
 
-`uv sync` updates `.venv` with the CUDA 13.2 PyTorch packages. The short training command is a smoke test; populate `screenshot/` and `element_anno/` first. `compileall` catches syntax errors. View logs with `uv run tensorboard --logdir runs`.
+On Windows hosts using a CP950 code page, set `$env:PYTHONUTF8 = "1"` before
+grounding-feature extraction if PyTorch Inductor otherwise fails while reading
+UTF-8 templates.
 
-## Coding Style & Naming Conventions
+## Data and Model Contracts
 
-Use four-space indentation and standard Python naming: `snake_case` for functions and variables, `PascalCase` for classes, and uppercase names for constants. Add type annotations to public functions and concise docstrings for non-obvious tensor transformations. Keep dimensions explicit, especially `(height, width)`, CHW layout, and row-major patch ordering. Prefer established PyTorch and torchvision operations over custom utilities.
+- Make image size around 432 by 768 pixels. Collector runs currently use 432 by 768 screenshots.
+- Images are CHW tensors. Always state spatial dimensions as `(height, width)`.
+- DINOv3 uses 16 by 16 patches.
 
-Black Formatter is configured. Keep imports grouped as standard library, third-party packages, then local modules.
+## Coding Style
 
-## Testing Guidelines
+Use four-space indentation and standard Python naming: `snake_case` for
+functions and variables, `PascalCase` for classes, and uppercase names for
+constants. Add type annotations to public functions and concise docstrings for
+non-obvious tensor or graph transformations.
 
-There is no automated test suite or coverage threshold. New behavior should include focused `pytest` tests when practical. Name tests `test_<behavior>` and validate shapes, dtypes, boundary boxes, and CPU execution. Before a pull request, run syntax checks and a small smoke test.
+Black is the formatter. Group imports as standard library, third-party
+packages, then local modules. Keep changes focused and preserve unrelated user
+work in a dirty worktree.
 
-## Commit & Pull Request Guidelines
+## Testing
 
-History contains only an initial commit, so no commit convention exists. Use short, imperative subjects such as `Add ragged batch validation`. Keep commits focused and exclude datasets, checkpoints, virtual environments, and TensorBoard output.
+Use `unittest`; `pytest` is not a project dependency. Add focused tests for new
+behavior and run the smallest relevant test module during iteration, followed
+by the full suite before handoff:
 
-Pull requests should explain the motivation, summarize behavioral changes, list commands run, and note dataset or CUDA assumptions. Include screenshots or TensorBoard comparisons when changing visible predictions or training behavior, and link relevant issues when available.
+```powershell
+uv run python -m unittest tests.test_state_dataset tests.test_state_pipeline -v
+uv run python -m unittest discover -s tests -v
+```
+
+For tensor code, test shapes, dtypes, boundary boxes, height/width order,
+flattened patch alignment, and CPU execution where practical. For state data,
+test referential integrity, path safety, repeated observations,
+self-transitions, and invalid/manual-label handling. Run a representative CLI
+smoke test for workflow changes; syntax checks alone are insufficient.
