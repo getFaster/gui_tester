@@ -4,7 +4,7 @@
 
 This Python 3.13/PyTorch project trains a patch-level GUI element classifier.
 
-- `main.py` is the training entry point for validation, logging, and checkpoints.
+- `train.py` is the training entry point for validation, logging, and checkpoints.
 - `amex_dataset.py` loads AMEX screenshots and annotations and builds patch masks.
 - `dinov3.py` wraps DINOv3 feature extraction.
 - `element_finder.py` defines the element-classification model.
@@ -31,7 +31,7 @@ uv run python -m compileall .
 
 Use four-space indentation and standard Python naming: `snake_case` for functions and variables, `PascalCase` for classes, and uppercase names for constants. Add type annotations to public functions and concise docstrings for non-obvious tensor transformations. Keep dimensions explicit, especially `(height, width)`, CHW layout, and row-major patch ordering. Prefer established PyTorch and torchvision operations over custom utilities.
 
-No formatter or linter is configured. Keep imports grouped as standard library, third-party packages, then local modules.
+Black Formatter is configured. Keep imports grouped as standard library, third-party packages, then local modules.
 
 ## Testing Guidelines
 

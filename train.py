@@ -113,6 +113,7 @@ def batch_loss(
             feature_chunk, target_chunk = zip(*chunk, strict=True)
             stacked_features = torch.stack(feature_chunk).to(device)
             stacked_targets = torch.stack(target_chunk).to(device)
+            torch.compiler.cudagraph_mark_step_begin()
             patch_logits = model(stacked_features)
 
             if patch_logits.shape != stacked_targets.shape:
@@ -153,6 +154,79 @@ def make_checkpoint(
     }
 
 
+def load_checkpoint(model, optim_muon, optim_adamw, args, device):
+    checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optim_muon.load_state_dict(checkpoint["optim_muon_state_dict"])
+    optim_adamw.load_state_dict(checkpoint["optim_adamw_state_dict"])
+    start_epoch = int(checkpoint["epoch"]) + 1
+    print(f"Resumed from {args.resume} at epoch {start_epoch + 1}.")
+    return checkpoint
+
+
+def changing_load(model, optim_muon, optim_adamw, args, device):
+    checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+    old_state = checkpoint["model_state_dict"]
+    new_state = model.state_dict()
+
+    # Load every unchanged parameter with a matching shape.
+    compatible_state = {
+        name: value
+        for name, value in old_state.items()
+        if name in new_state and value.shape == new_state[name].shape
+    }
+
+    for name in ["u", "gate", "out"]:
+        compatible_state[f"head.3.{name}.weight"] = old_state[f"head.1.{name}.weight"]
+        compatible_state[f"head.3.{name}.bias"] = old_state[f"head.1.{name}.bias"]
+
+    compatible_state["head.4.weight"] = old_state["head.2.weight"]
+    compatible_state["head.4.bias"] = old_state["head.2.bias"]
+
+    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+    print("Newly initialized parameters:", missing)
+    print("Unexpected parameters:", unexpected)
+
+    model_state_dict = checkpoint["model_state_dict"]
+    model.load_state_dict(model_state_dict, strict=False)
+    # optim_muon.load_state_dict(checkpoint["optim_muon_state_dict"])
+    # optim_adamw.load_state_dict(checkpoint["optim_adamw_state_dict"])
+    start_epoch = int(checkpoint["epoch"]) + 1
+    print(f"Resumed from {args.resume} at epoch {start_epoch + 1}.")
+    return checkpoint
+
+
+@torch.no_grad()
+def validate(model, val_loader, loss_fn, device, args):
+    model.eval()
+    val_total = 0.0
+    sample_count = 0
+    for images, masks in tqdm(val_loader, desc="Validation", leave=False):
+        tmp_loss = batch_loss(
+            model,
+            images,
+            masks,
+            loss_fn,
+            device,
+            args.loss_sub_batch_size,
+            backward=False,
+        )
+        val_total += tmp_loss * len(images)  # weighted by batch size
+        sample_count += len(images)
+    val_loss = val_total / sample_count
+    return val_loss
+
+
+def need_new_optimizer(checkpoint, adamw_hparams, muon_hparams) -> bool:
+    for hname, hparam in adamw_hparams.items():
+        if checkpoint["optim_adamw_state_dict"]["param_groups"][0][hname] != hparam:
+            return True
+    for hname, hparam in muon_hparams.items():
+        if checkpoint["optim_muon_state_dict"]["param_groups"][0][hname] != hparam:
+            return True
+    return False
+
+
 def main() -> None:
     args = parse_args()
     if (
@@ -179,20 +253,29 @@ def main() -> None:
         "batch_size": args.batch_size,
         "collate_fn": AmexDataset.collate_fn,
         "num_workers": args.num_workers,
-        "pin_memory": False,  # somehow the way we load the pt files is not compatible with pin_memory
-        # RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
-        # "pin_memory": torch.cuda.is_available(),
+        "pin_memory": torch.cuda.is_available(),
     }
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_options)
+    val_loader = DataLoader(val_dataset, shuffle=True, **loader_options)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ElementFinder().to(device)
     # model.compile(mode="reduce-overhead")
     muon_params = [p for p in model.parameters() if p.ndim == 2]
     other_params = [p for p in model.parameters() if p.ndim != 2]
-    optim_muon = torch.optim.Muon(muon_params, lr=0.02, momentum=0.95)
-    optim_adamw = torch.optim.AdamW(other_params, lr=3e-4, weight_decay=0.01)
+    muon_hparams: dict[str, Any] = {
+        "lr": 1e-5,
+        "weight_decay": 0.04,
+        "momentum": 0.95,
+    }
+    adamw_hparams = {
+        "lr": 5e-5,
+        "weight_decay": 0.04,
+        "amsgrad": True,
+    }
+
+    optim_muon = torch.optim.Muon(muon_params, **muon_hparams)
+    optim_adamw = torch.optim.AdamW(other_params, **adamw_hparams)
     loss_fn = torch.nn.BCEWithLogitsLoss()
 
     print(
@@ -200,16 +283,39 @@ def main() -> None:
     )
     start_epoch, best_val_loss = 0, float("inf")
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optim_muon.load_state_dict(checkpoint["optim_muon_state_dict"])
-        optim_adamw.load_state_dict(checkpoint["optim_adamw_state_dict"])
-        start_epoch = int(checkpoint["epoch"]) + 1
-        best_val_loss = float(checkpoint["best_val_loss"])
-        print(f"Resumed from {args.resume} at epoch {start_epoch + 1}.")
+        changing_architecture = True
+        if changing_architecture:
+            checkpoint = changing_load(model, optim_muon, optim_adamw, args, device)
+            start_epoch = int(checkpoint["epoch"]) + 1
+            best_val_loss = float(checkpoint["best_val_loss"])
+        else:
+            checkpoint = load_checkpoint(model, optim_muon, optim_adamw, args, device)
+            if need_new_optimizer(checkpoint, adamw_hparams, muon_hparams):
+                print("Optimizer hyperparameters changed: using a new optimizer.")
+                optim_muon = torch.optim.Muon(muon_params, **muon_hparams)
+                optim_adamw = torch.optim.AdamW(other_params, **adamw_hparams)
+            start_epoch = int(checkpoint["epoch"]) + 1
+            best_val_loss = float(checkpoint["best_val_loss"])
 
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     with SummaryWriter(log_dir=str(args.log_dir)) as writer:
+        hparams = {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "loss_sub_batch_size": args.loss_sub_batch_size,
+            "val_size": args.val_size,
+            "num_workers": args.num_workers,
+            "seed": args.seed,
+            "muon_lr": optim_muon.param_groups[0]["lr"],
+            "muon_weight_decay": optim_muon.param_groups[0]["weight_decay"],
+            "muon_momentum": optim_muon.param_groups[0]["momentum"],
+            "adamw_lr": optim_adamw.param_groups[0]["lr"],
+            "adamw_weight_decay": optim_adamw.param_groups[0]["weight_decay"],
+            "adamw_amsgrad": optim_adamw.param_groups[0]["amsgrad"],
+        }
+
+        writer.add_hparams(hparams, {})
+
         train_loss, val_loss = None, None
         for epoch in range(start_epoch, args.epochs):
             model.train()
@@ -237,20 +343,7 @@ def main() -> None:
                     epoch * len(train_loader) + progress.n,
                 )
             train_loss = train_total / len(train_loader)
-            model.eval()
-            val_total = 0.0
-            with torch.no_grad():
-                for images, masks in tqdm(val_loader, desc="Validation", leave=False):
-                    val_total += batch_loss(
-                        model,
-                        images,
-                        masks,
-                        loss_fn,
-                        device,
-                        args.loss_sub_batch_size,
-                        backward=False,
-                    )
-            val_loss = val_total / len(val_loader)
+            val_loss = validate(model, val_loader, loss_fn, device, args)
             writer.add_scalar("loss/validation", val_loss, epoch + 1)
             writer.flush()
 
@@ -269,14 +362,7 @@ def main() -> None:
             )
 
         writer.add_hparams(
-            {
-                "epochs": args.epochs,
-                "batch_size": args.batch_size,
-                "loss_sub_batch_size": args.loss_sub_batch_size,
-                "val_size": args.val_size,
-                "num_workers": args.num_workers,
-                "seed": args.seed,
-            },
+            hparams,
             {"hparam/train_loss": train_loss, "hparam/validation_loss": val_loss},
         )
 

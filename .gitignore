@@ -19,3 +19,8 @@ target/
 # Training artifacts
 runs/
 checkpoints/
+
+# State-abstraction experiment artifacts
+state_features/
+state_clusters/
+state_annotations/

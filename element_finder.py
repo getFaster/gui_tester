@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from network import Encoder, DynamicTanh
+from network import Encoder, DynamicTanh, SwiGLU
 
 
 class ElementFinder(nn.Module):
@@ -12,7 +12,9 @@ class ElementFinder(nn.Module):
         dim = 384  # DINOv3 ViT-S/16 embedding dimension
         self.model = Encoder(dim, num_layers=2)
         self.head = nn.Sequential(
-            DynamicTanh(dim), nn.Linear(dim, 2)  # 2 classes: clickable and scrollable
+            DynamicTanh(dim),
+            SwiGLU(dim, dim),
+            nn.Linear(dim, 2),
         )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
@@ -21,7 +23,7 @@ class ElementFinder(nn.Module):
         logits = logits[:, self.num_special_tokens :]
         return logits
 
-    def proccess_image(self, images: torch.Tensor):
+    def process_image(self, images: torch.Tensor):
         """
         ``images`` is channel-first (``C, H, W``) or batched channel-first
         (``B, C, H, W``). The result has shape ``(B, patches, 2)``; for an

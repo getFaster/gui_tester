@@ -1,0 +1,45 @@
+Epoch 28/30: train loss 0.12802, validation loss 0.17505
+Epoch 29/30: train loss 0.12545, validation loss 0.17835
+Epoch 30/30: train loss 0.12302, validation loss 0.17553
+Epoch 31/40: train loss 0.12074, validation loss 0.17639
+Epoch 32/40: train loss 0.11879, validation loss 0.17366
+Epoch 33/40: train loss 0.11668, validation loss 0.17657
+
+
+
+After switching to batchsize = 8: 
+Epoch 34/40: train loss 0.11586, validation loss 0.17360
+Epoch 35/40: train loss 0.11370, validation loss 0.17424
+Epoch 36/40: train loss 0.11178, validation loss 0.17989
+Epoch 37/40: train loss 0.10983, validation loss 0.17790
+Epoch 38/40: train loss 0.10804, validation loss 0.17911
+Epoch 39/40: train loss 0.10626, validation loss 0.17462
+
+Switch backed to batchsize 16, but half the learning rate (muon: 1e-5, adamw: 5e-5):
+Training on 64081 samples, validating on 1000 samples.
+Resumed from checkpoints\element_finder\best.pt at epoch 35.
+Epoch 35/40: train loss 0.11171, validation loss 0.17610
+Epoch 36/40: train loss 0.11059, validation loss 0.17961
+Epoch 37/40: train loss 0.10988, validation loss 0.17904
+Epoch 38/40: train loss 0.10923, validation loss 0.17609
+Epoch 39/40: train loss 0.10859, validation loss 0.17788
+
+
+Add one more layer in the head:
+Newly initialized parameters: ['head.2.alpha', 'head.2.gamma', 'head.2.beta']
+Unexpected parameters: []
+Resumed from checkpoints\element_finder\best.pt at epoch 35.
+Epoch 35/40: train loss 0.16498, validation loss 0.17738
+Epoch 36/40: train loss 0.11231, validation loss 0.17907
+Epoch 37/40: train loss 0.11085, validation loss 0.17721
+Epoch 38/40: train loss 0.10984, validation loss 0.17876
+
+
+3 attention layer, but back to one hidden layer head:
+Resumed from checkpoints\element_finder\best.pt at epoch 35.
+Epoch 35/50: train loss 0.11168, validation loss 0.17757
+Epoch 36/50: train loss 0.11076, validation loss 0.17667
+Epoch 37/50: train loss 0.10997, validation loss 0.17787
+Epoch 38/50: train loss 0.10936, validation loss 0.17767
+Epoch 39/50: train loss 0.10871, validation loss 0.17964
+Epoch 40/50: train loss 0.10807, validation loss 0.17960
