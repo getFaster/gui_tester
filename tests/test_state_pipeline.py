@@ -6,7 +6,16 @@ import torch
 from PIL import Image
 from torchvision.io import ImageReadMode, read_image
 
-from state_annotation_app import save_annotations, save_pair_decision
+from state_annotation_app import (
+    build_cluster_groups,
+    flagged_observations,
+    merge_cluster_assignments,
+    ordered_cluster_ids,
+    representative_observation_ids,
+    review_is_current,
+    save_cluster_review,
+    write_cluster_assignments,
+)
 from state_benchmark import (
     evaluate_assignments,
     manual_corrections_required,
@@ -105,48 +114,209 @@ class StatePipelineTest(unittest.TestCase):
         self.assertEqual(1.0, result["adjusted_rand_index"])
         self.assertEqual(1.0, result["pairwise_f1"])
 
-    def test_annotation_writes_replace_records_by_identity(self):
+    def test_cluster_review_writes_replace_records_by_cluster(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            annotation_path = Path(temp_dir) / "annotations.jsonl"
+            review_path = Path(temp_dir) / "reviews.jsonl"
             records = {}
-            save_annotations(
-                annotation_path,
+            save_cluster_review(
+                review_path,
                 records,
+                "cluster_0001",
                 ["obs_000001", "obs_000002"],
-                functional_label="Article",
-                substate_label="",
-                status="valid",
-            )
-            save_annotations(
-                annotation_path,
-                records,
                 ["obs_000002"],
-                functional_label="Dialog",
-                substate_label="",
-                status="valid",
             )
-            annotations = read_jsonl(annotation_path)
-            self.assertEqual(2, len(annotations))
-            self.assertEqual(
-                "Dialog",
-                {
-                    item["observation_id"]: item for item in annotations
-                }["obs_000002"]["manual_functional_state_label"],
+            save_cluster_review(
+                review_path,
+                records,
+                "cluster_0001",
+                ["obs_000001", "obs_000002"],
+                [],
+            )
+            reviews = read_jsonl(review_path)
+            self.assertEqual(1, len(reviews))
+            self.assertEqual([], reviews[0]["incorrect_observation_ids"])
+            self.assertTrue(
+                review_is_current(
+                    reviews[0],
+                    ["obs_000001", "obs_000002"],
+                )
             )
 
-            pairs_path = Path(temp_dir) / "pairs.jsonl"
-            pairs = {}
-            save_pair_decision(
-                pairs_path,
-                pairs,
-                "obs_000002",
-                "obs_000001",
-                "same",
+    def test_cluster_review_orders_multi_state_groups_before_singletons(self):
+        observations = tuple(
+            {"observation_id": f"obs_{index:06d}"} for index in range(1, 5)
+        )
+        dataset = StateDataset(
+            run_dir=Path("."),
+            manifest={"run_id": "run_001"},
+            observations=observations,
+            transitions=(),
+            observations_by_id={
+                observation["observation_id"]: observation
+                for observation in observations
+            },
+        )
+        assignments = [
+            {
+                "observation_id": "obs_000001",
+                "auto_cluster_id": "singleton_a",
+            },
+            {
+                "observation_id": "obs_000002",
+                "auto_cluster_id": "group_b",
+            },
+            {
+                "observation_id": "obs_000003",
+                "auto_cluster_id": "group_b",
+            },
+            {
+                "observation_id": "obs_000004",
+                "auto_cluster_id": "singleton_c",
+            },
+        ]
+        groups = build_cluster_groups(dataset, assignments)
+        cluster_ids = ordered_cluster_ids(groups)
+        self.assertEqual(
+            ["group_b", "singleton_a", "singleton_c"],
+            cluster_ids,
+        )
+
+        reviews = {
+            "group_b": {
+                "cluster_id": "group_b",
+                "observation_ids": ["obs_000002", "obs_000003"],
+                "incorrect_observation_ids": ["obs_000003"],
+                "status": "confirmed",
+            },
+            "singleton_a": {
+                "cluster_id": "singleton_a",
+                "observation_ids": ["obs_000001"],
+                "incorrect_observation_ids": ["obs_000001"],
+                "status": "confirmed",
+            },
+        }
+        self.assertEqual(
+            {
+                "group_b": ("obs_000003",),
+                "singleton_a": ("obs_000001",),
+            },
+            flagged_observations(cluster_ids, groups, reviews),
+        )
+
+    def test_cluster_review_rejects_missing_assignments(self):
+        observation = {"observation_id": "obs_000001"}
+        dataset = StateDataset(
+            run_dir=Path("."),
+            manifest={"run_id": "run_001"},
+            observations=(observation,),
+            transitions=(),
+            observations_by_id={"obs_000001": observation},
+        )
+        with self.assertRaisesRegex(ValueError, "Missing cluster assignments"):
+            build_cluster_groups(dataset, [])
+
+    def test_cluster_review_rejects_flags_outside_cluster(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                ValueError,
+                "must belong to the cluster",
+            ):
+                save_cluster_review(
+                    Path(temp_dir) / "reviews.jsonl",
+                    {},
+                    "cluster_0001",
+                    ["obs_000001"],
+                    ["obs_000002"],
+                )
+
+    def test_merge_cluster_assignments_uses_smallest_selected_id(self):
+        assignments = [
+            {
+                "observation_id": "obs_000001",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_b",
+            },
+            {
+                "observation_id": "obs_000002",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_a",
+            },
+            {
+                "observation_id": "obs_000003",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_c",
+            },
+        ]
+        merged, cluster_id = merge_cluster_assignments(
+            assignments,
+            ["cluster_b", "cluster_a"],
+        )
+        self.assertEqual("cluster_a", cluster_id)
+        self.assertEqual(
+            ["cluster_a", "cluster_a", "cluster_c"],
+            [record["auto_cluster_id"] for record in merged],
+        )
+        self.assertEqual("cluster_b", assignments[0]["auto_cluster_id"])
+
+    def test_merge_cluster_assignments_supports_transitive_merges(self):
+        assignments = [
+            {
+                "observation_id": f"obs_{index:06d}",
+                "baseline": "structure_str",
+                "auto_cluster_id": cluster_id,
+            }
+            for index, cluster_id in enumerate(
+                ["cluster_a", "cluster_b", "cluster_c"],
+                start=1,
             )
-            self.assertEqual(
-                "obs_000001__obs_000002",
-                read_jsonl(pairs_path)[0]["pair_id"],
-            )
+        ]
+        first_merge, _ = merge_cluster_assignments(
+            assignments,
+            ["cluster_a", "cluster_b"],
+        )
+        second_merge, _ = merge_cluster_assignments(
+            first_merge,
+            ["cluster_a", "cluster_c"],
+        )
+        self.assertEqual(
+            ["cluster_a", "cluster_a", "cluster_a"],
+            [record["auto_cluster_id"] for record in second_merge],
+        )
+
+    def test_merged_assignments_use_pipeline_jsonl_schema(self):
+        assignments = [
+            {
+                "observation_id": "obs_000001",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_a",
+                "ignored_extra_field": True,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "merged.jsonl"
+            write_cluster_assignments(output_path, assignments)
+            records = read_jsonl(output_path)
+        self.assertEqual(
+            [
+                {
+                    "observation_id": "obs_000001",
+                    "baseline": "structure_str",
+                    "auto_cluster_id": "cluster_a",
+                }
+            ],
+            records,
+        )
+
+    def test_representative_observations_cover_cluster_range(self):
+        observation_ids = [f"obs_{index:06d}" for index in range(1, 11)]
+        self.assertEqual(
+            ("obs_000001", "obs_000005", "obs_000010"),
+            representative_observation_ids(observation_ids),
+        )
+        self.assertEqual(
+            ("obs_000001",),
+            representative_observation_ids(observation_ids, maximum=1),
+        )
 
 
 if __name__ == "__main__":
