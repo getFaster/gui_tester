@@ -1,9 +1,11 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
 from PIL import Image
+from streamlit.testing.v1 import AppTest
 from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
@@ -32,6 +34,32 @@ from state_clustering import (
 )
 from state_dataset import StateDataset, read_jsonl
 from state_features import difference_hash, hamming_distance
+
+
+def run_annotation_app_for_test(
+    run_dir: str,
+    clusters_path: str,
+    reviews_path: str,
+    merged_clusters_path: str,
+    merged_reviews_path: str,
+) -> None:
+    """Run the annotation app with isolated test output paths."""
+    from state_annotation_app import main
+
+    main(
+        [
+            "--run-dir",
+            run_dir,
+            "--clusters",
+            clusters_path,
+            "--reviews",
+            reviews_path,
+            "--merged-clusters",
+            merged_clusters_path,
+            "--merged-reviews",
+            merged_reviews_path,
+        ]
+    )
 
 
 class StatePipelineTest(unittest.TestCase):
@@ -184,6 +212,133 @@ class StatePipelineTest(unittest.TestCase):
                     reviews[0],
                     ["obs_000001", "obs_000002", "obs_000003"],
                 )
+            )
+
+    def test_annotation_ui_saves_exact_visible_outlier_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / "run_001"
+            screenshots_dir = run_dir / "screenshots"
+            states_dir = run_dir / "states"
+            screenshots_dir.mkdir(parents=True)
+            states_dir.mkdir()
+
+            observation_ids = ["obs_000001", "obs_000002"]
+            observations = []
+            for index, observation_id in enumerate(observation_ids):
+                screenshot_relative_path = (
+                    Path("screenshots") / f"{observation_id}.png"
+                )
+                state_relative_path = Path("states") / f"{observation_id}.json"
+                Image.new(
+                    "RGB",
+                    (432, 768),
+                    color=(index * 32, 0, 0),
+                ).save(run_dir / screenshot_relative_path)
+                (run_dir / state_relative_path).write_text(
+                    "{}",
+                    encoding="utf-8",
+                )
+                observations.append(
+                    {
+                        "observation_id": observation_id,
+                        "screenshot_path": screenshot_relative_path.as_posix(),
+                        "view_tree_path": state_relative_path.as_posix(),
+                        "activity": "org.example/.MainActivity",
+                    }
+                )
+
+            (run_dir / "run.json").write_text(
+                json.dumps({"run_id": "run_001"}),
+                encoding="utf-8",
+            )
+            (run_dir / "observations.jsonl").write_text(
+                "".join(
+                    json.dumps(observation) + "\n"
+                    for observation in observations
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "transitions.jsonl").write_text(
+                json.dumps(
+                    {
+                        "transition_id": "trans_000001",
+                        "source_observation_id": observation_ids[0],
+                        "destination_observation_id": observation_ids[1],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            clusters_path = root / "clusters.jsonl"
+            clusters_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "observation_id": observation_id,
+                            "baseline": "test",
+                            "auto_cluster_id": "cluster_0001",
+                        }
+                    )
+                    + "\n"
+                    for observation_id in observation_ids
+                ),
+                encoding="utf-8",
+            )
+            reviews_path = root / "reviews.jsonl"
+            merged_clusters_path = root / "clusters_merged.jsonl"
+            merged_reviews_path = root / "reviews_merged.jsonl"
+
+            app = AppTest.from_function(
+                run_annotation_app_for_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+
+            outlier_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+            ]
+            self.assertEqual(2, len(outlier_checkboxes))
+            self.assertEqual(
+                [False, False],
+                [checkbox.value for checkbox in outlier_checkboxes],
+            )
+
+            outlier_checkboxes[1].check().run()
+            visible_outlier_values = [
+                checkbox.value
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+            ]
+            self.assertEqual([False, True], visible_outlier_values)
+
+            confirm_button = next(
+                button
+                for button in app.button
+                if button.label == "Confirm and continue"
+            )
+            confirm_button.click().run()
+            self.assertEqual([], app.exception)
+
+            self.assertEqual(
+                [
+                    {
+                        "cluster_id": "cluster_0001",
+                        "observation_ids": observation_ids,
+                        "incorrect_observation_ids": [observation_ids[1]],
+                        "status": "confirmed",
+                    }
+                ],
+                read_jsonl(reviews_path),
             )
 
     def test_merged_reviews_do_not_modify_original_reviews(self):
