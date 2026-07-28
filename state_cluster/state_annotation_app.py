@@ -88,6 +88,31 @@ def ordered_cluster_ids(
     )
 
 
+def next_unreviewed_cluster_id(
+    cluster_ids: Sequence[str],
+    unreviewed_cluster_ids: Sequence[str],
+    current_cluster_id: str,
+) -> str | None:
+    """Return the next unreviewed cluster after the current selection."""
+    if current_cluster_id not in cluster_ids:
+        raise ValueError(f"Unknown current cluster: {current_cluster_id}")
+
+    unreviewed_ids = set(unreviewed_cluster_ids)
+    current_index = cluster_ids.index(current_cluster_id)
+    following_ids = (
+        list(cluster_ids[current_index + 1 :])
+        + list(cluster_ids[:current_index])
+    )
+    return next(
+        (
+            cluster_id
+            for cluster_id in following_ids
+            if cluster_id in unreviewed_ids
+        ),
+        None,
+    )
+
+
 def review_is_current(
     review: dict[str, Any] | None,
     observation_ids: Sequence[str],
@@ -323,6 +348,14 @@ def _clear_review_widget_state(
         )
 
 
+def _outlier_cluster_key(reviews_path: Path) -> str:
+    return f"outlier-cluster::{reviews_path.resolve()}"
+
+
+def _outlier_navigation_key(reviews_path: Path) -> str:
+    return f"outlier-navigation::{reviews_path.resolve()}"
+
+
 def _render_observation(
     st: Any,
     dataset: StateDataset,
@@ -431,23 +464,52 @@ def _render_outlier_review(
 
     if not pending_ids:
         st.success("All clusters have been reviewed.")
-        _render_flagged_queue(st, dataset, flagged)
-        return
 
-    cluster_id = pending_ids[0]
+    picker_key = _outlier_cluster_key(reviews_path)
+    navigation_key = _outlier_navigation_key(reviews_path)
+    requested_cluster_id = st.session_state.pop(navigation_key, None)
+    if requested_cluster_id in groups:
+        st.session_state[picker_key] = requested_cluster_id
+    selected_cluster_id = st.session_state.get(picker_key)
+    if selected_cluster_id not in groups:
+        st.session_state[picker_key] = (
+            pending_ids[0] if pending_ids else cluster_ids[0]
+        )
+    reviewed_id_set = set(reviewed_ids)
+    cluster_id = st.selectbox(
+        "Cluster to review",
+        cluster_ids,
+        key=picker_key,
+        format_func=lambda candidate_id: (
+            f"{candidate_id} · {len(groups[candidate_id])} state(s) · "
+            f"{'Reviewed' if candidate_id in reviewed_id_set else 'Unreviewed'}"
+        ),
+    )
     observation_ids = groups[cluster_id]
+    saved_review = reviews.get(cluster_id)
+    saved_review_is_current = review_is_current(
+        saved_review,
+        observation_ids,
+    )
+    saved_incorrect_ids = (
+        set(saved_review.get("incorrect_observation_ids", ()))
+        if saved_review_is_current and saved_review is not None
+        else set()
+    )
     review_scope = _review_widget_scope(
         "original",
         reviews_path,
         cluster_id,
         observation_ids,
     )
-    review_number = completed_clusters + 1
+    review_number = cluster_ids.index(cluster_id) + 1
     group_kind = (
         "Multi-state cluster" if len(observation_ids) > 1 else "Singleton cluster"
     )
     st.subheader(f"{group_kind} {review_number} of {total_clusters}")
     st.caption(f"{cluster_id} · {len(observation_ids)} state(s)")
+    if saved_review_is_current:
+        st.info("This cluster has been reviewed. Confirm to update its review.")
 
     columns = st.columns(min(4, len(observation_ids)))
     incorrect_ids: list[str] = []
@@ -460,6 +522,7 @@ def _render_outlier_review(
                 selectable=True,
                 cluster_id=cluster_id,
                 review_scope=review_scope,
+                selected_by_default=observation_id in saved_incorrect_ids,
             ):
                 incorrect_ids.append(observation_id)
 
@@ -489,7 +552,25 @@ def _render_outlier_review(
             observation_ids,
             incorrect_ids,
         )
+        remaining_unreviewed_ids = [
+            candidate_id
+            for candidate_id in cluster_ids
+            if not review_is_current(
+                reviews.get(candidate_id),
+                groups[candidate_id],
+            )
+        ]
+        next_cluster_id = next_unreviewed_cluster_id(
+            cluster_ids,
+            remaining_unreviewed_ids,
+            cluster_id,
+        )
+        if next_cluster_id is not None:
+            st.session_state[navigation_key] = next_cluster_id
         st.rerun()
+
+    if not pending_ids:
+        _render_flagged_queue(st, dataset, flagged)
 
 
 def _selection_key(merged_path: Path, cluster_id: str) -> str:
@@ -802,7 +883,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     dataset = StateDataset.load(args.run_dir)
     original_assignments = read_jsonl(args.clusters)
-    original_groups = build_cluster_groups(dataset, original_assignments)
+    build_cluster_groups(dataset, original_assignments)
     reviews_path = _default_reviews_path(args, dataset.run_id)
     reviews = _records_by_key(reviews_path, "cluster_id")
     merged_reviews_path = _default_merged_reviews_path(args, reviews_path)
@@ -819,7 +900,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if merged_path.is_file()
         else original_assignments
     )
-    build_cluster_groups(dataset, merged_assignments)
+    merged_groups = build_cluster_groups(dataset, merged_assignments)
 
     st.set_page_config(
         page_title="Cluster Verification",
@@ -834,7 +915,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         _render_outlier_review(
             st,
             dataset,
-            original_groups,
+            merged_groups,
             reviews_path,
             reviews,
         )

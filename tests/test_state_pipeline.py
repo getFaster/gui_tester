@@ -11,6 +11,7 @@ from state_annotation_app import (
     build_cluster_groups,
     flagged_observations,
     merge_cluster_assignments,
+    next_unreviewed_cluster_id,
     ordered_cluster_ids,
     parse_args,
     representative_observation_ids,
@@ -273,6 +274,47 @@ class StatePipelineTest(unittest.TestCase):
                 "singleton_a": ("obs_000001",),
             },
             flagged_observations(cluster_ids, groups, reviews),
+        )
+
+    def test_review_advances_to_next_unreviewed_cluster(self):
+        cluster_ids = ["cluster_a", "cluster_b", "cluster_c", "cluster_d"]
+        self.assertEqual(
+            "cluster_d",
+            next_unreviewed_cluster_id(
+                cluster_ids,
+                ["cluster_a", "cluster_d"],
+                "cluster_b",
+            ),
+        )
+        self.assertEqual(
+            "cluster_a",
+            next_unreviewed_cluster_id(
+                cluster_ids,
+                ["cluster_a"],
+                "cluster_d",
+            ),
+        )
+        self.assertIsNone(
+            next_unreviewed_cluster_id(
+                cluster_ids,
+                [],
+                "cluster_b",
+            )
+        )
+
+    def test_merged_membership_requires_a_new_review(self):
+        review = {
+            "cluster_id": "cluster_a",
+            "observation_ids": ["obs_000001"],
+            "incorrect_observation_ids": [],
+            "status": "confirmed",
+        }
+        self.assertTrue(review_is_current(review, ["obs_000001"]))
+        self.assertFalse(
+            review_is_current(
+                review,
+                ["obs_000001", "obs_000002"],
+            )
         )
 
     def test_cluster_review_rejects_missing_assignments(self):
