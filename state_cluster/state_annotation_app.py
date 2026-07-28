@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any, Sequence
 
 from state_dataset import StateDataset, read_jsonl
+
+
+REVIEW_IMAGE_WIDTH = 320
 
 
 def _records_by_key(path: Path, key: str) -> dict[str, dict[str, Any]]:
@@ -244,6 +248,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "the original cluster assignments."
         ),
     )
+    parser.add_argument(
+        "--merged-reviews",
+        type=Path,
+        help=(
+            "Reviews created from the cluster-merging gallery. Defaults to a "
+            "_merged file beside the normal review output."
+        ),
+    )
     args, _ = parser.parse_known_args(argv)
     return args
 
@@ -262,6 +274,55 @@ def _default_merged_clusters_path(args: argparse.Namespace) -> Path:
     return args.clusters.with_name(f"{args.clusters.stem}_merged.jsonl")
 
 
+def _default_merged_reviews_path(
+    args: argparse.Namespace,
+    reviews_path: Path,
+) -> Path:
+    if args.merged_reviews is not None:
+        return args.merged_reviews
+    return reviews_path.with_name(
+        f"{reviews_path.stem}_merged{reviews_path.suffix}"
+    )
+
+
+def _review_widget_scope(
+    mode: str,
+    reviews_path: Path,
+    cluster_id: str,
+    observation_ids: Sequence[str],
+) -> str:
+    membership = "\0".join(observation_ids).encode("utf-8")
+    membership_hash = hashlib.sha256(membership).hexdigest()[:12]
+    return (
+        f"{mode}::{reviews_path.resolve()}::{cluster_id}::{membership_hash}"
+    )
+
+
+def _incorrect_widget_key(
+    review_scope: str,
+    cluster_id: str,
+    observation_id: str,
+) -> str:
+    return f"incorrect::{review_scope}::{cluster_id}::{observation_id}"
+
+
+def _clear_review_widget_state(
+    st: Any,
+    review_scope: str,
+    cluster_id: str,
+    observation_ids: Sequence[str],
+) -> None:
+    for observation_id in observation_ids:
+        st.session_state.pop(
+            _incorrect_widget_key(
+                review_scope,
+                cluster_id,
+                observation_id,
+            ),
+            None,
+        )
+
+
 def _render_observation(
     st: Any,
     dataset: StateDataset,
@@ -269,18 +330,25 @@ def _render_observation(
     *,
     selectable: bool,
     cluster_id: str,
+    review_scope: str,
+    selected_by_default: bool = False,
 ) -> bool:
     observation = dataset.observations_by_id[observation_id]
     with st.container(border=True):
         st.image(
             str(dataset.screenshot_path(observation_id)),
-            use_container_width=True,
+            width=REVIEW_IMAGE_WIDTH,
         )
         selected = False
         if selectable:
             selected = st.checkbox(
                 "Does not belong",
-                key=f"incorrect::{cluster_id}::{observation_id}",
+                value=selected_by_default,
+                key=_incorrect_widget_key(
+                    review_scope,
+                    cluster_id,
+                    observation_id,
+                ),
             )
         st.caption(f"**{observation_id}**")
         activity = observation.get("activity")
@@ -316,6 +384,7 @@ def _render_flagged_queue(
                     observation_id,
                     selectable=False,
                     cluster_id=cluster_id,
+                    review_scope="flagged",
                 )
 
 
@@ -367,6 +436,12 @@ def _render_outlier_review(
 
     cluster_id = pending_ids[0]
     observation_ids = groups[cluster_id]
+    review_scope = _review_widget_scope(
+        "original",
+        reviews_path,
+        cluster_id,
+        observation_ids,
+    )
     review_number = completed_clusters + 1
     group_kind = (
         "Multi-state cluster" if len(observation_ids) > 1 else "Singleton cluster"
@@ -384,6 +459,7 @@ def _render_outlier_review(
                 observation_id,
                 selectable=True,
                 cluster_id=cluster_id,
+                review_scope=review_scope,
             ):
                 incorrect_ids.append(observation_id)
 
@@ -426,7 +502,7 @@ def _render_cluster_card(
     merged_path: Path,
     cluster_id: str,
     observation_ids: Sequence[str],
-) -> None:
+) -> bool:
     with st.container(border=True):
         st.markdown(f"**{cluster_id}**")
         st.caption(
@@ -445,6 +521,97 @@ def _render_cluster_card(
             "Select cluster",
             key=_selection_key(merged_path, cluster_id),
         )
+        return st.button(
+            "Review outliers",
+            key=f"merge-review::{merged_path.resolve()}::{cluster_id}",
+            use_container_width=True,
+        )
+
+
+def _focused_review_key(merged_path: Path) -> str:
+    return f"focused-review::{merged_path.resolve()}"
+
+
+def _render_focused_cluster_review(
+    st: Any,
+    dataset: StateDataset,
+    merged_path: Path,
+    cluster_id: str,
+    observation_ids: Sequence[str],
+    reviews_path: Path,
+    reviews: dict[str, dict[str, Any]],
+) -> None:
+    st.subheader(f"Review {cluster_id}")
+    st.caption(
+        f"{len(observation_ids)} current state(s) · Select every state that "
+        "does not belong in this cluster."
+    )
+
+    saved_review = reviews.get(cluster_id)
+    saved_review_is_current = review_is_current(
+        saved_review,
+        observation_ids,
+    )
+    saved_incorrect_ids = (
+        set(saved_review.get("incorrect_observation_ids", ()))
+        if saved_review_is_current and saved_review is not None
+        else set()
+    )
+    if saved_review_is_current:
+        st.info("This cluster has a saved review. You can update it below.")
+
+    review_scope = _review_widget_scope(
+        "merged",
+        reviews_path,
+        cluster_id,
+        observation_ids,
+    )
+    columns = st.columns(min(4, len(observation_ids)))
+    incorrect_ids: list[str] = []
+    for index, observation_id in enumerate(observation_ids):
+        with columns[index % len(columns)]:
+            if _render_observation(
+                st,
+                dataset,
+                observation_id,
+                selectable=True,
+                cluster_id=cluster_id,
+                review_scope=review_scope,
+                selected_by_default=observation_id in saved_incorrect_ids,
+            ):
+                incorrect_ids.append(observation_id)
+
+    action_columns = st.columns((3, 1))
+    if action_columns[0].button(
+        "Confirm review",
+        type="primary",
+        use_container_width=True,
+    ):
+        save_cluster_review(
+            reviews_path,
+            reviews,
+            cluster_id,
+            observation_ids,
+            incorrect_ids,
+        )
+        st.session_state.pop(_focused_review_key(merged_path), None)
+        st.toast(f"Saved review for {cluster_id}")
+        st.rerun()
+
+    if action_columns[1].button(
+        "Back to gallery",
+        use_container_width=True,
+    ):
+        _clear_review_widget_state(
+            st,
+            review_scope,
+            cluster_id,
+            observation_ids,
+        )
+        st.session_state.pop(_focused_review_key(merged_path), None)
+        st.rerun()
+
+    st.caption(f"Merged-cluster reviews: {reviews_path}")
 
 
 def _render_merge_preview(
@@ -479,6 +646,8 @@ def _render_merge_tab(
     original_assignments: Sequence[dict[str, Any]],
     merged_assignments: Sequence[dict[str, Any]],
     merged_path: Path,
+    merged_reviews_path: Path,
+    merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
     groups = build_cluster_groups(dataset, merged_assignments)
     cluster_ids = ordered_cluster_ids(groups)
@@ -491,6 +660,23 @@ def _render_merge_tab(
         "Select clusters that represent the same functional state. The "
         "original assignment file is never modified."
     )
+    focused_key = _focused_review_key(merged_path)
+    focused_cluster_id = st.session_state.get(focused_key)
+    if focused_cluster_id not in groups:
+        st.session_state.pop(focused_key, None)
+        focused_cluster_id = None
+    if focused_cluster_id is not None:
+        _render_focused_cluster_review(
+            st,
+            dataset,
+            merged_path,
+            focused_cluster_id,
+            groups[focused_cluster_id],
+            merged_reviews_path,
+            merged_reviews,
+        )
+        return
+
     metric_columns = st.columns(3)
     metric_columns[0].metric("Current clusters", merged_cluster_count)
     metric_columns[1].metric(
@@ -539,15 +725,20 @@ def _render_merge_tab(
         st.info("No cluster IDs match the filter.")
     else:
         gallery_columns = st.columns(4)
+        requested_review_id = None
         for index, cluster_id in enumerate(page_ids):
             with gallery_columns[index % len(gallery_columns)]:
-                _render_cluster_card(
+                if _render_cluster_card(
                     st,
                     dataset,
                     merged_path,
                     cluster_id,
                     groups[cluster_id],
-                )
+                ):
+                    requested_review_id = cluster_id
+        if requested_review_id is not None:
+            st.session_state[focused_key] = requested_review_id
+            st.rerun()
 
     selected_ids = [
         cluster_id
@@ -614,6 +805,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     original_groups = build_cluster_groups(dataset, original_assignments)
     reviews_path = _default_reviews_path(args, dataset.run_id)
     reviews = _records_by_key(reviews_path, "cluster_id")
+    merged_reviews_path = _default_merged_reviews_path(args, reviews_path)
+    if merged_reviews_path.resolve() == reviews_path.resolve():
+        raise ValueError(
+            "Merged-cluster reviews must not overwrite original reviews"
+        )
+    merged_reviews = _records_by_key(merged_reviews_path, "cluster_id")
     merged_path = _default_merged_clusters_path(args)
     if merged_path.resolve() == args.clusters.resolve():
         raise ValueError("Merged output must not overwrite the input assignments")
@@ -648,6 +845,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             original_assignments,
             merged_assignments,
             merged_path,
+            merged_reviews_path,
+            merged_reviews,
         )
 
 

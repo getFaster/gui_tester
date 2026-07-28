@@ -7,10 +7,12 @@ from PIL import Image
 from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
+    _default_merged_reviews_path,
     build_cluster_groups,
     flagged_observations,
     merge_cluster_assignments,
     ordered_cluster_ids,
+    parse_args,
     representative_observation_ids,
     review_is_current,
     save_cluster_review,
@@ -31,6 +33,40 @@ from state_features import difference_hash, hamming_distance
 
 
 class StatePipelineTest(unittest.TestCase):
+    def test_default_merged_reviews_path_follows_normal_reviews(self):
+        args = type("Args", (), {"merged_reviews": None})()
+        self.assertEqual(
+            Path("annotations/run_reviews_merged.jsonl"),
+            _default_merged_reviews_path(
+                args,
+                Path("annotations/run_reviews.jsonl"),
+            ),
+        )
+
+    def test_explicit_merged_reviews_path_is_preserved(self):
+        output_path = Path("custom/focused_reviews.jsonl")
+        args = type("Args", (), {"merged_reviews": output_path})()
+        self.assertEqual(
+            output_path,
+            _default_merged_reviews_path(
+                args,
+                Path("annotations/run_reviews.jsonl"),
+            ),
+        )
+
+    def test_parse_args_accepts_merged_reviews_output(self):
+        args = parse_args(
+            [
+                "--run-dir",
+                "run_001",
+                "--clusters",
+                "clusters.jsonl",
+                "--merged-reviews",
+                "focused_reviews.jsonl",
+            ]
+        )
+        self.assertEqual(Path("focused_reviews.jsonl"), args.merged_reviews)
+
     def test_difference_hash_is_deterministic_and_64_bits(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "screen.png"
@@ -140,6 +176,42 @@ class StatePipelineTest(unittest.TestCase):
                     reviews[0],
                     ["obs_000001", "obs_000002"],
                 )
+            )
+            self.assertFalse(
+                review_is_current(
+                    reviews[0],
+                    ["obs_000001", "obs_000002", "obs_000003"],
+                )
+            )
+
+    def test_merged_reviews_do_not_modify_original_reviews(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_path = Path(temp_dir) / "reviews.jsonl"
+            merged_path = Path(temp_dir) / "reviews_merged.jsonl"
+            original_reviews = {}
+            merged_reviews = {}
+            save_cluster_review(
+                original_path,
+                original_reviews,
+                "cluster_0001",
+                ["obs_000001"],
+                [],
+            )
+            save_cluster_review(
+                merged_path,
+                merged_reviews,
+                "cluster_0001",
+                ["obs_000001", "obs_000002"],
+                ["obs_000002"],
+            )
+
+            self.assertEqual(
+                ["obs_000001"],
+                read_jsonl(original_path)[0]["observation_ids"],
+            )
+            self.assertEqual(
+                ["obs_000001", "obs_000002"],
+                read_jsonl(merged_path)[0]["observation_ids"],
             )
 
     def test_cluster_review_orders_multi_state_groups_before_singletons(self):
