@@ -596,6 +596,10 @@ def _selection_key(merged_path: Path, cluster_id: str) -> str:
     return f"merge-select::{merged_path.resolve()}::{cluster_id}"
 
 
+def _pending_selection_clear_key(merged_path: Path) -> str:
+    return f"merge-clear-selection::{merged_path.resolve()}"
+
+
 def _render_cluster_card(
     st: Any,
     dataset: StateDataset,
@@ -777,6 +781,13 @@ def _render_merge_tab(
     merged_reviews_path: Path,
     merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
+    pending_selection_ids = st.session_state.pop(
+        _pending_selection_clear_key(merged_path),
+        (),
+    )
+    for cluster_id in pending_selection_ids:
+        st.session_state[_selection_key(merged_path, cluster_id)] = False
+
     groups = build_cluster_groups(dataset, merged_assignments)
     cluster_ids = ordered_cluster_ids(groups)
     original_cluster_count = len(
@@ -906,8 +917,9 @@ def _render_merge_tab(
         history = st.session_state.setdefault(history_key, [])
         history.append([dict(record) for record in merged_assignments])
         write_cluster_assignments(merged_path, updated_assignments)
-        for cluster_id in selected_ids:
-            st.session_state[_selection_key(merged_path, cluster_id)] = False
+        st.session_state[_pending_selection_clear_key(merged_path)] = tuple(
+            selected_ids
+        )
         st.toast(f"Merged into {merged_cluster_id}")
         st.rerun()
 
@@ -930,8 +942,9 @@ def _render_merge_tab(
     if reset_requested:
         history.append([dict(record) for record in merged_assignments])
         write_cluster_assignments(merged_path, original_assignments)
-        for cluster_id in cluster_ids:
-            st.session_state[_selection_key(merged_path, cluster_id)] = False
+        st.session_state[_pending_selection_clear_key(merged_path)] = tuple(
+            cluster_ids
+        )
         st.rerun()
 
     st.caption(f"Merged assignments: {merged_path}")
