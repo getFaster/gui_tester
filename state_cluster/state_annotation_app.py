@@ -253,6 +253,25 @@ def flagged_observations(
     return flagged
 
 
+def current_outlier_observation_ids(
+    cluster_id: str,
+    observation_ids: Sequence[str],
+    review_collections: Sequence[dict[str, dict[str, Any]]],
+) -> tuple[str, ...]:
+    """Collect current outliers confirmed through any review entry point."""
+    outlier_ids: set[str] = set()
+    for reviews in review_collections:
+        review = reviews.get(cluster_id)
+        if not review_is_current(review, observation_ids):
+            continue
+        outlier_ids.update(review.get("incorrect_observation_ids", ()))
+    return tuple(
+        observation_id
+        for observation_id in observation_ids
+        if observation_id in outlier_ids
+    )
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -583,6 +602,7 @@ def _render_cluster_card(
     merged_path: Path,
     cluster_id: str,
     observation_ids: Sequence[str],
+    outlier_observation_ids: Sequence[str],
 ) -> bool:
     with st.container(border=True):
         st.markdown(f"**{cluster_id}**")
@@ -590,14 +610,28 @@ def _render_cluster_card(
             f"{len(observation_ids)} "
             f"state{'s' if len(observation_ids) != 1 else ''}"
         )
-        preview_ids = representative_observation_ids(observation_ids)
-        st.image(
-            [
-                str(dataset.screenshot_path(observation_id))
-                for observation_id in preview_ids
-            ],
-            width=92,
-        )
+        outlier_ids = set(outlier_observation_ids)
+        preview_candidates = [
+            observation_id
+            for observation_id in observation_ids
+            if observation_id not in outlier_ids
+        ]
+        if outlier_ids:
+            st.caption(
+                f"{len(outlier_ids)} outlier"
+                f"{'s' if len(outlier_ids) != 1 else ''} hidden"
+            )
+        if preview_candidates:
+            preview_ids = representative_observation_ids(preview_candidates)
+            st.image(
+                [
+                    str(dataset.screenshot_path(observation_id))
+                    for observation_id in preview_ids
+                ],
+                width=92,
+            )
+        else:
+            st.warning("All states are marked as outliers.")
         st.checkbox(
             "Select cluster",
             key=_selection_key(merged_path, cluster_id),
@@ -700,6 +734,7 @@ def _render_merge_preview(
     dataset: StateDataset,
     groups: dict[str, tuple[str, ...]],
     selected_cluster_ids: Sequence[str],
+    outlier_ids_by_cluster: dict[str, tuple[str, ...]],
 ) -> None:
     with st.expander("Preview selected clusters", expanded=True):
         columns = st.columns(min(3, len(selected_cluster_ids)))
@@ -707,18 +742,29 @@ def _render_merge_preview(
             with columns[index % len(columns)]:
                 st.markdown(f"**{cluster_id}**")
                 observation_ids = groups[cluster_id]
-                preview_ids = representative_observation_ids(
-                    observation_ids,
-                    maximum=4,
-                )
-                st.image(
-                    [
-                        str(dataset.screenshot_path(observation_id))
-                        for observation_id in preview_ids
-                    ],
-                    width=150,
-                )
+                outlier_ids = set(outlier_ids_by_cluster[cluster_id])
+                preview_candidates = [
+                    observation_id
+                    for observation_id in observation_ids
+                    if observation_id not in outlier_ids
+                ]
+                if preview_candidates:
+                    preview_ids = representative_observation_ids(
+                        preview_candidates,
+                        maximum=4,
+                    )
+                    st.image(
+                        [
+                            str(dataset.screenshot_path(observation_id))
+                            for observation_id in preview_ids
+                        ],
+                        width=150,
+                    )
+                else:
+                    st.warning("All states are marked as outliers.")
                 st.caption(f"{len(observation_ids)} state(s)")
+                if outlier_ids:
+                    st.caption(f"{len(outlier_ids)} outlier(s) hidden")
 
 
 def _render_merge_tab(
@@ -727,6 +773,7 @@ def _render_merge_tab(
     original_assignments: Sequence[dict[str, Any]],
     merged_assignments: Sequence[dict[str, Any]],
     merged_path: Path,
+    reviews: dict[str, dict[str, Any]],
     merged_reviews_path: Path,
     merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
@@ -736,6 +783,14 @@ def _render_merge_tab(
         build_cluster_groups(dataset, original_assignments)
     )
     merged_cluster_count = len(cluster_ids)
+    outlier_ids_by_cluster = {
+        cluster_id: current_outlier_observation_ids(
+            cluster_id,
+            groups[cluster_id],
+            (reviews, merged_reviews),
+        )
+        for cluster_id in cluster_ids
+    }
 
     st.caption(
         "Select clusters that represent the same functional state. The "
@@ -815,6 +870,7 @@ def _render_merge_tab(
                     merged_path,
                     cluster_id,
                     groups[cluster_id],
+                    outlier_ids_by_cluster[cluster_id],
                 ):
                     requested_review_id = cluster_id
         if requested_review_id is not None:
@@ -827,7 +883,13 @@ def _render_merge_tab(
         if st.session_state.get(_selection_key(merged_path, cluster_id), False)
     ]
     if selected_ids:
-        _render_merge_preview(st, dataset, groups, selected_ids)
+        _render_merge_preview(
+            st,
+            dataset,
+            groups,
+            selected_ids,
+            outlier_ids_by_cluster,
+        )
 
     action_columns = st.columns((3, 1, 1))
     if action_columns[0].button(
@@ -926,6 +988,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             original_assignments,
             merged_assignments,
             merged_path,
+            reviews,
             merged_reviews_path,
             merged_reviews,
         )

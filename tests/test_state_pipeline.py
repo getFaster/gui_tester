@@ -9,6 +9,7 @@ from torchvision.io import ImageReadMode, read_image
 from state_annotation_app import (
     _default_merged_reviews_path,
     build_cluster_groups,
+    current_outlier_observation_ids,
     flagged_observations,
     merge_cluster_assignments,
     next_unreviewed_cluster_id,
@@ -315,6 +316,51 @@ class StatePipelineTest(unittest.TestCase):
                 review,
                 ["obs_000001", "obs_000002"],
             )
+        )
+
+    def test_preview_outliers_include_both_current_review_sources(self):
+        observation_ids = ["obs_000001", "obs_000002", "obs_000003"]
+        original_reviews = {
+            "cluster_a": {
+                "cluster_id": "cluster_a",
+                "observation_ids": observation_ids,
+                "incorrect_observation_ids": ["obs_000001"],
+                "status": "confirmed",
+            }
+        }
+        merged_reviews = {
+            "cluster_a": {
+                "cluster_id": "cluster_a",
+                "observation_ids": observation_ids,
+                "incorrect_observation_ids": ["obs_000003"],
+                "status": "confirmed",
+            }
+        }
+        self.assertEqual(
+            ("obs_000001", "obs_000003"),
+            current_outlier_observation_ids(
+                "cluster_a",
+                observation_ids,
+                (original_reviews, merged_reviews),
+            ),
+        )
+
+    def test_preview_ignores_outliers_from_stale_membership(self):
+        reviews = {
+            "cluster_a": {
+                "cluster_id": "cluster_a",
+                "observation_ids": ["obs_000001"],
+                "incorrect_observation_ids": ["obs_000001"],
+                "status": "confirmed",
+            }
+        }
+        self.assertEqual(
+            (),
+            current_outlier_observation_ids(
+                "cluster_a",
+                ["obs_000001", "obs_000002"],
+                (reviews,),
+            ),
         )
 
     def test_cluster_review_rejects_missing_assignments(self):
