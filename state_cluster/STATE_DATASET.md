@@ -56,10 +56,25 @@ uv run python state_clustering.py C:\path\to\run_001 --baseline grounding `
 uv run python state_clustering.py C:\path\to\run_001 `
   --baseline grounding_transition `
   --feature-dir state_features\run_001\grounding
+uv run python state_clustering.py C:\path\to\run_001 `
+  --baseline element_matching `
+  --feature-dir state_features\run_001\grounding
 ```
 
+`element_matching` compares all contextual ElementFinder tile embeddings
+between each pair of screens. It computes clickable and scrollable scores
+separately, weights every tile pair by both sigmoid probabilities, and uses a
+bidirectional best match so an important element missing from either screen
+reduces similarity. The default class weights are equal. Use
+`--clickable-weight` and `--scrollable-weight` to change them,
+`--similarity-device cpu` to force CPU execution, or `--tile-chunk-size` to
+limit the temporary tile-pair matrix. Chunking remains an exact all-pairs
+comparison.
+
 Tune `--distance-threshold` on a development run before evaluating held-out
-runs.
+runs. The initial `0.15` default is shared with the other embedding baselines
+and should be included in a threshold sweep rather than treated as calibrated
+for element matching.
 
 ## Annotate and evaluate
 

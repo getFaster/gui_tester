@@ -15,6 +15,9 @@ from state_dataset import StateDataset, read_jsonl
 from state_features import hamming_distance
 
 
+ELEMENT_CLASS_NAMES = ("clickable", "scrollable")
+
+
 def categorical_clusters(
     observations: Sequence[dict[str, Any]], field: str
 ) -> list[int]:
@@ -88,6 +91,48 @@ def embedding_clusters(
     return model.fit_predict(normalized.cpu().numpy()).tolist()
 
 
+def distance_matrix_clusters(
+    distances: torch.Tensor, *, distance_threshold: float
+) -> list[int]:
+    """Agglomeratively cluster a symmetric precomputed distance matrix."""
+    if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
+        raise ValueError(
+            "Expected a square (observations, observations) distance matrix, "
+            f"got {tuple(distances.shape)}"
+        )
+    if not torch.isfinite(distances).all():
+        raise ValueError("Distance matrix must contain only finite values")
+    if not torch.allclose(distances, distances.T, atol=1e-6, rtol=0):
+        raise ValueError("Distance matrix must be symmetric")
+    if not torch.allclose(
+        distances.diagonal(),
+        torch.zeros(
+            distances.shape[0],
+            dtype=distances.dtype,
+            device=distances.device,
+        ),
+        atol=1e-6,
+        rtol=0,
+    ):
+        raise ValueError("Distance matrix diagonal must be zero")
+    if (distances < 0).any():
+        raise ValueError("Distance matrix must not contain negative values")
+    if distances.shape[0] == 0:
+        return []
+    if distances.shape[0] == 1:
+        return [0]
+
+    from sklearn.cluster import AgglomerativeClustering
+
+    model = AgglomerativeClustering(
+        n_clusters=None,
+        metric="precomputed",
+        linkage="average",
+        distance_threshold=distance_threshold,
+    )
+    return model.fit_predict(distances.cpu().numpy()).tolist()
+
+
 def load_feature_payloads(
     dataset: StateDataset, feature_dir: Path
 ) -> dict[str, dict[str, Any]]:
@@ -136,6 +181,174 @@ def grounding_embedding(payload: dict[str, Any]) -> torch.Tensor:
             torch.sigmoid(logits).mean(dim=0),
         ]
     )
+
+
+def _prepare_element_payload(
+    payload: dict[str, Any], device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate and move one screen's normalized tile features and probabilities."""
+    patch_features = payload.get("patch_features")
+    element_logits = payload.get("element_logits")
+    if not isinstance(patch_features, torch.Tensor) or patch_features.ndim != 2:
+        raise ValueError("patch_features must have shape (tiles, embedding_dim)")
+    if patch_features.shape[0] == 0 or patch_features.shape[1] == 0:
+        raise ValueError("patch_features must not be empty")
+    if (
+        not isinstance(element_logits, torch.Tensor)
+        or element_logits.ndim != 2
+        or element_logits.shape
+        != (patch_features.shape[0], len(ELEMENT_CLASS_NAMES))
+    ):
+        raise ValueError(
+            "element_logits must have shape "
+            f"(tiles, {len(ELEMENT_CLASS_NAMES)}) matching patch_features"
+        )
+    patch_grid = payload.get("patch_grid")
+    if (
+        not isinstance(patch_grid, (tuple, list))
+        or len(patch_grid) != 2
+        or not all(isinstance(size, int) and size > 0 for size in patch_grid)
+        or patch_grid[0] * patch_grid[1] != patch_features.shape[0]
+    ):
+        raise ValueError(
+            "patch_grid must contain positive rows and columns matching tiles"
+        )
+    if not torch.isfinite(patch_features).all():
+        raise ValueError("patch_features must contain only finite values")
+    if not torch.isfinite(element_logits).all():
+        raise ValueError("element_logits must contain only finite values")
+
+    normalized_features = F.normalize(
+        patch_features.to(device=device, dtype=torch.float32),
+        dim=1,
+    )
+    probabilities = torch.sigmoid(
+        element_logits.to(device=device, dtype=torch.float32)
+    )
+    return normalized_features, probabilities
+
+
+def _raw_element_matching_scores(
+    first: tuple[torch.Tensor, torch.Tensor],
+    second: tuple[torch.Tensor, torch.Tensor],
+    *,
+    tile_chunk_size: int,
+) -> torch.Tensor:
+    """Return one symmetric bidirectional best-match score per element class."""
+    if tile_chunk_size < 1:
+        raise ValueError("tile_chunk_size must be positive")
+    first_features, first_probabilities = first
+    second_features, second_probabilities = second
+    if first_features.device != second_features.device:
+        raise ValueError("Both screens must be on the same similarity device")
+    if first_features.shape[1] != second_features.shape[1]:
+        raise ValueError("Tile embedding dimensions must match")
+
+    first_maxima = torch.zeros_like(first_probabilities)
+    second_maxima = torch.zeros_like(second_probabilities)
+    for first_start in range(0, first_features.shape[0], tile_chunk_size):
+        first_end = first_start + tile_chunk_size
+        first_feature_chunk = first_features[first_start:first_end]
+        first_probability_chunk = first_probabilities[first_start:first_end]
+        for second_start in range(0, second_features.shape[0], tile_chunk_size):
+            second_end = second_start + tile_chunk_size
+            second_probability_chunk = second_probabilities[
+                second_start:second_end
+            ]
+            cosine_similarity = (
+                first_feature_chunk
+                @ second_features[second_start:second_end].T
+            ).clamp_min(0)
+            for class_index in range(len(ELEMENT_CLASS_NAMES)):
+                weighted_similarity = (
+                    cosine_similarity
+                    * first_probability_chunk[:, class_index, None]
+                    * second_probability_chunk[None, :, class_index]
+                )
+                first_maxima[
+                    first_start:first_end, class_index
+                ] = torch.maximum(
+                    first_maxima[first_start:first_end, class_index],
+                    weighted_similarity.max(dim=1).values,
+                )
+                second_maxima[
+                    second_start:second_end, class_index
+                ] = torch.maximum(
+                    second_maxima[second_start:second_end, class_index],
+                    weighted_similarity.max(dim=0).values,
+                )
+
+    epsilon = torch.finfo(first_probabilities.dtype).eps
+    first_directed = first_maxima.sum(dim=0) / first_probabilities.sum(
+        dim=0
+    ).clamp_min(epsilon)
+    second_directed = second_maxima.sum(dim=0) / second_probabilities.sum(
+        dim=0
+    ).clamp_min(epsilon)
+    return (first_directed + second_directed) / 2
+
+
+@torch.no_grad()
+def element_matching_distance_matrix(
+    payloads: Sequence[dict[str, Any]],
+    *,
+    class_weights: Sequence[float] = (1.0, 1.0),
+    device: torch.device | str = "cpu",
+    tile_chunk_size: int = 512,
+) -> torch.Tensor:
+    """Build exact pairwise screen distances from probability-weighted tile matches."""
+    if len(class_weights) != len(ELEMENT_CLASS_NAMES):
+        raise ValueError(
+            f"class_weights must contain {len(ELEMENT_CLASS_NAMES)} values"
+        )
+    weights = torch.tensor(class_weights, dtype=torch.float32)
+    if not torch.isfinite(weights).all() or (weights < 0).any():
+        raise ValueError("class_weights must be finite and non-negative")
+    if weights.sum() <= 0:
+        raise ValueError("At least one class weight must be positive")
+    if tile_chunk_size < 1:
+        raise ValueError("tile_chunk_size must be positive")
+
+    similarity_device = torch.device(device)
+    prepared = [
+        _prepare_element_payload(payload, similarity_device) for payload in payloads
+    ]
+    observation_count = len(prepared)
+    distances = torch.zeros(
+        (observation_count, observation_count), dtype=torch.float32
+    )
+    if observation_count < 2:
+        return distances
+
+    self_scores = [
+        _raw_element_matching_scores(
+            screen,
+            screen,
+            tile_chunk_size=tile_chunk_size,
+        )
+        for screen in prepared
+    ]
+    device_weights = weights.to(similarity_device)
+    epsilon = torch.finfo(torch.float32).eps
+    for first_index, first in enumerate(prepared):
+        for second_index in range(first_index):
+            cross_score = _raw_element_matching_scores(
+                first,
+                prepared[second_index],
+                tile_chunk_size=tile_chunk_size,
+            )
+            normalization = torch.sqrt(
+                self_scores[first_index] * self_scores[second_index]
+            ).clamp_min(epsilon)
+            class_similarities = (cross_score / normalization).clamp(0, 1)
+            similarity = (
+                (class_similarities * device_weights).sum()
+                / device_weights.sum()
+            )
+            distance = (1 - similarity).clamp(0, 1).cpu()
+            distances[first_index, second_index] = distance
+            distances[second_index, first_index] = distance
+    return distances
 
 
 def transition_embeddings(
@@ -228,13 +441,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "dino",
             "grounding",
             "grounding_transition",
+            "element_matching",
         ),
     )
     parser.add_argument("--feature-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("state_clusters"))
     parser.add_argument("--distance-threshold", type=float, default=0.15)
     parser.add_argument("--max-hamming-distance", type=int, default=8)
+    parser.add_argument("--clickable-weight", type=float, default=1.0)
+    parser.add_argument("--scrollable-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--similarity-device",
+        default="auto",
+        help="Torch device for tile matching (default: CUDA when available).",
+    )
+    parser.add_argument("--tile-chunk-size", type=int, default=512)
     return parser.parse_args(argv)
+
+
+def resolve_similarity_device(name: str) -> torch.device:
+    """Resolve an explicit or automatically selected tile-similarity device."""
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA similarity device requested, but CUDA is unavailable")
+    return device
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -269,7 +501,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.feature_dir is None:
             raise ValueError("--feature-dir is required for embedding baselines")
         payloads = load_feature_payloads(dataset, args.feature_dir)
-        if baseline == "dino":
+        if baseline == "element_matching":
+            distances = element_matching_distance_matrix(
+                [
+                    payloads[observation["observation_id"]]
+                    for observation in dataset.observations
+                ],
+                class_weights=(
+                    args.clickable_weight,
+                    args.scrollable_weight,
+                ),
+                device=resolve_similarity_device(args.similarity_device),
+                tile_chunk_size=args.tile_chunk_size,
+            )
+            labels = distance_matrix_clusters(
+                distances,
+                distance_threshold=args.distance_threshold,
+            )
+        elif baseline == "dino":
             embeddings = torch.stack(
                 [
                     payloads[observation["observation_id"]]["global_embedding"]
@@ -290,10 +539,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                         for observation in dataset.observations
                     ]
                 )
-        labels = embedding_clusters(
-            embeddings,
-            distance_threshold=args.distance_threshold,
-        )
+        if baseline != "element_matching":
+            labels = embedding_clusters(
+                embeddings,
+                distance_threshold=args.distance_threshold,
+            )
 
     output_path = args.output_dir / dataset.run_id / f"{baseline}.jsonl"
     write_assignments(output_path, dataset, baseline, labels)
