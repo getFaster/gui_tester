@@ -15,3 +15,5 @@ data/*
 # Training artifacts
 */runs/
 */checkpoints/
+state_annotations/
+state_clusters/

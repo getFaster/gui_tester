@@ -34,6 +34,45 @@ uv run python state_features.py C:\path\to\run_001 --extractor grounding `
   --grounding-checkpoint checkpoints\element_finder\best.pt
 ```
 
+## Deduplicate exact screenshots
+
+Create a separate observation-only dataset that keeps at most three evenly
+spaced occurrences of each exact screenshot:
+
+```powershell
+uv run python state_deduplicate.py `
+  C:\path\to\run_001 `
+  C:\path\to\run_001_deduplicated `
+  --max-per-image 3
+```
+
+Screenshot identity is based on decoded RGB pixels and image dimensions, so
+PNG compression and metadata do not affect the result. The source run is not
+modified. The derived run has no transitions because globally removing
+observations cannot preserve the original event trajectory. Its
+`deduplication.jsonl` records every repeated-image group and which observation
+IDs were retained or discarded. Regenerate features, clusters, and annotations
+for the derived run instead of reusing outputs keyed to the source run.
+
+To retain an existing clustering and its cluster IDs, filter an assignment
+file instead of copying the dataset:
+
+```powershell
+uv run python state_deduplicate.py `
+  C:\path\to\run_006 `
+  state_clusters\run_006\structure_str_merged_deduplicated.jsonl `
+  --assignments state_clusters\run_006\structure_str_merged.jsonl `
+  --max-per-image 3
+```
+
+This mode compares screenshots only among observations with the same
+`auto_cluster_id`. It writes a subset of the original assignment records and a
+neighboring `_deduplication.jsonl` audit file. The original dataset, cluster
+IDs, and clustering file are unchanged. Because the output intentionally omits
+some observations, use it as a representative assignment subset for downstream
+analysis rather than as input to the annotation UI, which requires complete
+dataset coverage.
+
 ## Build clustering baselines
 
 Categorical baselines do not require feature files:
