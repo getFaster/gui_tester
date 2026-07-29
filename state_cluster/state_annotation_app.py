@@ -217,6 +217,54 @@ def merge_cluster_assignments(
     return merged_assignments, merged_cluster_id
 
 
+def assign_outliers_to_singleton_clusters(
+    assignments: Sequence[dict[str, Any]],
+    outlier_observation_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Move every selected observation into its own stable cluster."""
+    outlier_ids = set(outlier_observation_ids)
+    assignment_ids = {
+        record.get("observation_id")
+        for record in assignments
+        if isinstance(record.get("observation_id"), str)
+    }
+    missing_ids = sorted(outlier_ids - assignment_ids)
+    if missing_ids:
+        raise ValueError(
+            "Unknown outlier observations: " + ", ".join(missing_ids)
+        )
+
+    cluster_sizes: dict[str, int] = {}
+    existing_cluster_ids: set[str] = set()
+    for record in assignments:
+        cluster_id = record.get("auto_cluster_id")
+        if isinstance(cluster_id, str):
+            existing_cluster_ids.add(cluster_id)
+            cluster_sizes[cluster_id] = cluster_sizes.get(cluster_id, 0) + 1
+
+    updated_assignments: list[dict[str, Any]] = []
+    for record in assignments:
+        updated = dict(record)
+        observation_id = updated.get("observation_id")
+        cluster_id = updated.get("auto_cluster_id")
+        if (
+            observation_id in outlier_ids
+            and isinstance(cluster_id, str)
+            and cluster_sizes.get(cluster_id, 0) > 1
+        ):
+            digest = hashlib.sha256(observation_id.encode("utf-8")).hexdigest()
+            prefix = f"{cluster_id}__outlier_"
+            singleton_id = prefix + digest[:12]
+            collision_index = 2
+            while singleton_id in existing_cluster_ids:
+                singleton_id = f"{prefix}{digest[:12]}_{collision_index}"
+                collision_index += 1
+            updated["auto_cluster_id"] = singleton_id
+            existing_cluster_ids.add(singleton_id)
+        updated_assignments.append(updated)
+    return updated_assignments
+
+
 def representative_observation_ids(
     observation_ids: Sequence[str],
     *,
@@ -444,6 +492,8 @@ def _render_outlier_review(
     st: Any,
     dataset: StateDataset,
     groups: dict[str, tuple[str, ...]],
+    merged_assignments: Sequence[dict[str, Any]],
+    merged_path: Path,
     reviews_path: Path,
     reviews: dict[str, dict[str, Any]],
 ) -> None:
@@ -571,6 +621,14 @@ def _render_outlier_review(
             observation_ids,
             incorrect_ids,
         )
+        if incorrect_ids:
+            write_cluster_assignments(
+                merged_path,
+                assign_outliers_to_singleton_clusters(
+                    merged_assignments,
+                    incorrect_ids,
+                ),
+            )
         remaining_unreviewed_ids = [
             candidate_id
             for candidate_id in cluster_ids
@@ -654,6 +712,7 @@ def _focused_review_key(merged_path: Path) -> str:
 def _render_focused_cluster_review(
     st: Any,
     dataset: StateDataset,
+    merged_assignments: Sequence[dict[str, Any]],
     merged_path: Path,
     cluster_id: str,
     observation_ids: Sequence[str],
@@ -713,6 +772,14 @@ def _render_focused_cluster_review(
             observation_ids,
             incorrect_ids,
         )
+        if incorrect_ids:
+            write_cluster_assignments(
+                merged_path,
+                assign_outliers_to_singleton_clusters(
+                    merged_assignments,
+                    incorrect_ids,
+                ),
+            )
         st.session_state.pop(_focused_review_key(merged_path), None)
         st.toast(f"Saved review for {cluster_id}")
         st.rerun()
@@ -816,6 +883,7 @@ def _render_merge_tab(
         _render_focused_cluster_review(
             st,
             dataset,
+            merged_assignments,
             merged_path,
             focused_cluster_id,
             groups[focused_cluster_id],
@@ -975,7 +1043,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if merged_path.is_file()
         else original_assignments
     )
-    merged_groups = build_cluster_groups(dataset, merged_assignments)
+    original_groups = build_cluster_groups(dataset, original_assignments)
 
     st.set_page_config(
         page_title="Cluster Verification",
@@ -990,7 +1058,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         _render_outlier_review(
             st,
             dataset,
-            merged_groups,
+            original_groups,
+            merged_assignments,
+            merged_path,
             reviews_path,
             reviews,
         )

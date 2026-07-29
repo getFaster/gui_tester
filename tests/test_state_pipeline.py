@@ -10,6 +10,7 @@ from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
     _default_merged_reviews_path,
+    assign_outliers_to_singleton_clusters,
     build_cluster_groups,
     current_outlier_observation_ids,
     flagged_observations,
@@ -340,6 +341,17 @@ class StatePipelineTest(unittest.TestCase):
                 ],
                 read_jsonl(reviews_path),
             )
+            merged_groups = build_cluster_groups(
+                StateDataset.load(run_dir),
+                read_jsonl(merged_clusters_path),
+            )
+            self.assertEqual(2, len(merged_groups))
+            self.assertTrue(
+                all(
+                    len(group_observation_ids) == 1
+                    for group_observation_ids in merged_groups.values()
+                )
+            )
 
     def test_merged_reviews_do_not_modify_original_reviews(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -596,6 +608,45 @@ class StatePipelineTest(unittest.TestCase):
         self.assertEqual(
             ["cluster_a", "cluster_a", "cluster_a"],
             [record["auto_cluster_id"] for record in second_merge],
+        )
+
+    def test_annotated_outliers_become_distinct_singleton_clusters(self):
+        assignments = [
+            {
+                "observation_id": observation_id,
+                "baseline": "embedding",
+                "auto_cluster_id": "cluster_a",
+            }
+            for observation_id in ("state_1", "state_2", "state_3")
+        ]
+
+        updated = assign_outliers_to_singleton_clusters(
+            assignments,
+            ["state_1", "state_2"],
+        )
+        groups: dict[str, list[str]] = {}
+        for record in updated:
+            groups.setdefault(record["auto_cluster_id"], []).append(
+                record["observation_id"]
+            )
+
+        self.assertEqual(3, len(groups))
+        self.assertTrue(
+            all(len(observation_ids) == 1 for observation_ids in groups.values())
+        )
+        self.assertEqual("cluster_a", updated[2]["auto_cluster_id"])
+        self.assertTrue(
+            updated[0]["auto_cluster_id"].startswith("cluster_a__outlier_")
+        )
+        self.assertNotEqual(
+            updated[0]["auto_cluster_id"],
+            updated[1]["auto_cluster_id"],
+        )
+        self.assertTrue(
+            all(
+                record["auto_cluster_id"] == "cluster_a"
+                for record in assignments
+            )
         )
 
     def test_merged_assignments_use_pipeline_jsonl_schema(self):
