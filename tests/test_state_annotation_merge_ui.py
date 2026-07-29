@@ -39,8 +39,9 @@ def create_two_cluster_fixture(
     root: Path,
     *,
     review_first_cluster: bool = False,
+    cluster_count: int = 2,
 ) -> tuple[Path, Path, Path, Path, Path]:
-    """Create a two-state run whose states begin in separate clusters."""
+    """Create a run whose states begin in separate clusters."""
     run_dir = root / "run_001"
     screenshots_dir = run_dir / "screenshots"
     states_dir = run_dir / "states"
@@ -49,7 +50,7 @@ def create_two_cluster_fixture(
 
     observations = []
     cluster_records = []
-    for index in range(1, 3):
+    for index in range(1, cluster_count + 1):
         observation_id = f"obs_{index:06d}"
         screenshot_relative_path = (
             Path("screenshots") / f"{observation_id}.png"
@@ -86,14 +87,17 @@ def create_two_cluster_fixture(
         encoding="utf-8",
     )
     (run_dir / "transitions.jsonl").write_text(
-        json.dumps(
-            {
-                "transition_id": "trans_000001",
-                "source_observation_id": "obs_000001",
-                "destination_observation_id": "obs_000002",
-            }
-        )
-        + "\n",
+        "".join(
+            json.dumps(
+                {
+                    "transition_id": f"trans_{index:06d}",
+                    "source_observation_id": f"obs_{index:06d}",
+                    "destination_observation_id": f"obs_{index + 1:06d}",
+                }
+            )
+            + "\n"
+            for index in range(1, cluster_count)
+        ),
         encoding="utf-8",
     )
 
@@ -156,6 +160,198 @@ def select_and_merge_two_clusters(app: AppTest) -> AppTest:
 
 
 class StateAnnotationMergeUiTest(unittest.TestCase):
+    def test_merged_review_can_group_selected_outliers_together(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root)
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+            select_and_merge_two_clusters(app)
+
+            review_button = next(
+                button
+                for button in app.button
+                if button.label == "Review outliers"
+            )
+            review_button.click().run()
+            self.assertEqual([], app.exception)
+
+            merged_outlier_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+                and "merged" in str(checkbox.key)
+            ]
+            self.assertEqual(2, len(merged_outlier_checkboxes))
+            merged_outlier_checkboxes[0].check().run()
+            merged_outlier_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+                and "merged" in str(checkbox.key)
+            ]
+            merged_outlier_checkboxes[1].check().run()
+
+            merged_grouping_radio = next(
+                radio
+                for radio in app.radio
+                if radio.label
+                == "How should the selected outliers be clustered?"
+                and "merged" in str(radio.key)
+            )
+            merged_grouping_radio.set_value("together").run()
+            confirm_button = next(
+                button
+                for button in app.button
+                if button.label == "Confirm review"
+            )
+            confirm_button.click().run()
+
+            self.assertEqual([], app.exception)
+            updated_assignments = read_jsonl(merged_clusters_path)
+            cluster_ids = {
+                record["auto_cluster_id"] for record in updated_assignments
+            }
+            self.assertEqual(1, len(cluster_ids))
+            self.assertTrue(next(iter(cluster_ids)).startswith("outlier_group_"))
+
+    def test_unselect_all_clears_cluster_selections(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root)
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+
+            selection_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Select cluster"
+            ]
+            selection_checkboxes[0].check().run()
+            selection_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Select cluster"
+            ]
+            selection_checkboxes[1].check().run()
+
+            unselect_button = next(
+                button
+                for button in app.button
+                if button.label == "Unselect all"
+            )
+            unselect_button.click().run()
+
+            self.assertEqual([], app.exception)
+            self.assertTrue(
+                all(
+                    not checkbox.value
+                    for checkbox in app.checkbox
+                    if checkbox.label == "Select cluster"
+                )
+            )
+            merge_button = next(
+                button
+                for button in app.button
+                if button.label == "Merge selected clusters"
+            )
+            self.assertTrue(merge_button.disabled)
+
+    def test_selection_persists_across_cluster_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root, cluster_count=13)
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+
+            page_size = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Clusters per page"
+            )
+            page_size.select(12).run()
+            first_selection = next(
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Select cluster"
+            )
+            first_selection.check().run()
+
+            page_number = next(
+                number_input
+                for number_input in app.number_input
+                if number_input.label == "Page"
+            )
+            page_number.set_value(2).run()
+            self.assertEqual([], app.exception)
+            self.assertTrue(
+                any(
+                    caption.value.endswith("1 selected")
+                    for caption in app.caption
+                )
+            )
+
+            page_number = next(
+                number_input
+                for number_input in app.number_input
+                if number_input.label == "Page"
+            )
+            page_number.set_value(1).run()
+            first_selection = next(
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Select cluster"
+            )
+            self.assertTrue(first_selection.value)
+
     def test_merge_clears_instantiated_selection_widgets(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

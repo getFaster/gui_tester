@@ -10,6 +10,7 @@ from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
     _default_merged_reviews_path,
+    assign_outliers_to_same_cluster,
     assign_outliers_to_singleton_clusters,
     build_cluster_groups,
     current_outlier_observation_ids,
@@ -352,6 +353,21 @@ class StatePipelineTest(unittest.TestCase):
                     for group_observation_ids in merged_groups.values()
                 )
             )
+            visible_outlier_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+                and "original" in str(checkbox.key)
+            ]
+            self.assertEqual(1, len(visible_outlier_checkboxes))
+            self.assertIn(
+                observation_ids[0],
+                str(visible_outlier_checkboxes[0].key),
+            )
+            self.assertNotIn(
+                observation_ids[1],
+                str(visible_outlier_checkboxes[0].key),
+            )
 
     def test_merged_reviews_do_not_modify_original_reviews(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -642,6 +658,36 @@ class StatePipelineTest(unittest.TestCase):
             updated[0]["auto_cluster_id"],
             updated[1]["auto_cluster_id"],
         )
+        self.assertTrue(
+            all(
+                record["auto_cluster_id"] == "cluster_a"
+                for record in assignments
+            )
+        )
+
+    def test_selected_outliers_can_become_one_new_cluster(self):
+        assignments = [
+            {
+                "observation_id": observation_id,
+                "baseline": "embedding",
+                "auto_cluster_id": "cluster_a",
+            }
+            for observation_id in ("state_1", "state_2", "state_3")
+        ]
+
+        updated = assign_outliers_to_same_cluster(
+            assignments,
+            ["state_1", "state_2"],
+        )
+
+        self.assertEqual(
+            updated[0]["auto_cluster_id"],
+            updated[1]["auto_cluster_id"],
+        )
+        self.assertTrue(
+            updated[0]["auto_cluster_id"].startswith("outlier_group_")
+        )
+        self.assertEqual("cluster_a", updated[2]["auto_cluster_id"])
         self.assertTrue(
             all(
                 record["auto_cluster_id"] == "cluster_a"

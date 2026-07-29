@@ -13,6 +13,12 @@ from state_dataset import StateDataset, read_jsonl
 
 
 REVIEW_IMAGE_WIDTH = 320
+OUTLIER_GROUPING_SINGLETONS = "singletons"
+OUTLIER_GROUPING_TOGETHER = "together"
+OUTLIER_GROUPING_OPTIONS = (
+    OUTLIER_GROUPING_SINGLETONS,
+    OUTLIER_GROUPING_TOGETHER,
+)
 
 
 def _records_by_key(path: Path, key: str) -> dict[str, dict[str, Any]]:
@@ -265,6 +271,73 @@ def assign_outliers_to_singleton_clusters(
     return updated_assignments
 
 
+def assign_outliers_to_same_cluster(
+    assignments: Sequence[dict[str, Any]],
+    outlier_observation_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Move all selected observations into one stable new cluster."""
+    outlier_ids = set(outlier_observation_ids)
+    assignment_ids = {
+        record.get("observation_id")
+        for record in assignments
+        if isinstance(record.get("observation_id"), str)
+    }
+    missing_ids = sorted(outlier_ids - assignment_ids)
+    if missing_ids:
+        raise ValueError(
+            "Unknown outlier observations: " + ", ".join(missing_ids)
+        )
+    if not outlier_ids:
+        return [dict(record) for record in assignments]
+
+    digest_source = "\0".join(sorted(outlier_ids)).encode("utf-8")
+    digest = hashlib.sha256(digest_source).hexdigest()[:12]
+    existing_cluster_ids = {
+        str(record["auto_cluster_id"])
+        for record in assignments
+        if isinstance(record.get("auto_cluster_id"), str)
+    }
+    grouped_cluster_id = f"outlier_group_{digest}"
+    collision_index = 2
+    while grouped_cluster_id in existing_cluster_ids:
+        existing_members = {
+            record.get("observation_id")
+            for record in assignments
+            if record.get("auto_cluster_id") == grouped_cluster_id
+        }
+        if existing_members == outlier_ids:
+            break
+        grouped_cluster_id = f"outlier_group_{digest}_{collision_index}"
+        collision_index += 1
+
+    updated_assignments: list[dict[str, Any]] = []
+    for record in assignments:
+        updated = dict(record)
+        if updated.get("observation_id") in outlier_ids:
+            updated["auto_cluster_id"] = grouped_cluster_id
+        updated_assignments.append(updated)
+    return updated_assignments
+
+
+def assign_selected_outliers(
+    assignments: Sequence[dict[str, Any]],
+    outlier_observation_ids: Sequence[str],
+    grouping: str,
+) -> list[dict[str, Any]]:
+    """Apply the selected outlier grouping strategy."""
+    if grouping == OUTLIER_GROUPING_SINGLETONS:
+        return assign_outliers_to_singleton_clusters(
+            assignments,
+            outlier_observation_ids,
+        )
+    if grouping == OUTLIER_GROUPING_TOGETHER:
+        return assign_outliers_to_same_cluster(
+            assignments,
+            outlier_observation_ids,
+        )
+    raise ValueError(f"Unknown outlier grouping strategy: {grouping}")
+
+
 def representative_observation_ids(
     observation_ids: Sequence[str],
     *,
@@ -415,6 +488,24 @@ def _clear_review_widget_state(
         )
 
 
+def _outlier_grouping_widget_key(review_scope: str) -> str:
+    return f"outlier-grouping::{review_scope}"
+
+
+def _render_outlier_grouping_option(st: Any, review_scope: str) -> str:
+    return st.radio(
+        "How should the selected outliers be clustered?",
+        OUTLIER_GROUPING_OPTIONS,
+        format_func=lambda grouping: (
+            "Each outlier becomes a singleton cluster"
+            if grouping == OUTLIER_GROUPING_SINGLETONS
+            else "All selected outliers form one new cluster"
+        ),
+        horizontal=True,
+        key=_outlier_grouping_widget_key(review_scope),
+    )
+
+
 def _outlier_cluster_key(reviews_path: Path) -> str:
     return f"outlier-cluster::{reviews_path.resolve()}"
 
@@ -550,7 +641,9 @@ def _render_outlier_review(
         cluster_ids,
         key=picker_key,
         format_func=lambda candidate_id: (
-            f"{candidate_id} · {len(groups[candidate_id])} state(s) · "
+            f"{candidate_id} · "
+            f"{len(groups[candidate_id]) - len(flagged.get(candidate_id, ()))} "
+            "state(s) · "
             f"{'Reviewed' if candidate_id in reviewed_id_set else 'Unreviewed'}"
         ),
     )
@@ -560,10 +653,15 @@ def _render_outlier_review(
         saved_review,
         observation_ids,
     )
-    saved_incorrect_ids = (
+    confirmed_incorrect_ids = (
         set(saved_review.get("incorrect_observation_ids", ()))
         if saved_review_is_current and saved_review is not None
         else set()
+    )
+    visible_observation_ids = tuple(
+        observation_id
+        for observation_id in observation_ids
+        if observation_id not in confirmed_incorrect_ids
     )
     review_scope = _review_widget_scope(
         "original",
@@ -573,41 +671,50 @@ def _render_outlier_review(
     )
     review_number = cluster_ids.index(cluster_id) + 1
     group_kind = (
-        "Multi-state cluster" if len(observation_ids) > 1 else "Singleton cluster"
+        "Multi-state cluster"
+        if len(visible_observation_ids) > 1
+        else "Singleton cluster"
+        if visible_observation_ids
+        else "Empty cluster"
     )
     st.subheader(f"{group_kind} {review_number} of {total_clusters}")
-    st.caption(f"{cluster_id} · {len(observation_ids)} state(s)")
+    st.caption(f"{cluster_id} · {len(visible_observation_ids)} state(s)")
     if saved_review_is_current:
         st.info("This cluster has been reviewed. Confirm to update its review.")
 
-    columns = st.columns(min(4, len(observation_ids)))
-    incorrect_ids: list[str] = []
-    for index, observation_id in enumerate(observation_ids):
-        with columns[index % len(columns)]:
-            if _render_observation(
-                st,
-                dataset,
-                observation_id,
-                selectable=True,
-                cluster_id=cluster_id,
-                review_scope=review_scope,
-                selected_by_default=observation_id in saved_incorrect_ids,
-            ):
-                incorrect_ids.append(observation_id)
+    newly_incorrect_ids: list[str] = []
+    if visible_observation_ids:
+        columns = st.columns(min(4, len(visible_observation_ids)))
+        for index, observation_id in enumerate(visible_observation_ids):
+            with columns[index % len(columns)]:
+                if _render_observation(
+                    st,
+                    dataset,
+                    observation_id,
+                    selectable=True,
+                    cluster_id=cluster_id,
+                    review_scope=review_scope,
+                ):
+                    newly_incorrect_ids.append(observation_id)
+    else:
+        st.info("All states confirmed as outliers have moved out of this cluster.")
 
-    if len(observation_ids) == 1:
+    if len(visible_observation_ids) == 1:
         st.caption(
             "For a singleton, select the state if this cluster should be "
             "reconsidered or merged later."
         )
-    elif incorrect_ids:
+    elif newly_incorrect_ids:
         st.caption(
-            f"{len(incorrect_ids)} state(s) will be added to the follow-up queue."
+            f"{len(newly_incorrect_ids)} state(s) will be added to the "
+            "follow-up queue."
         )
-    else:
+    elif visible_observation_ids:
         st.caption(
             "Nothing selected: every state will be accepted in this cluster."
         )
+
+    outlier_grouping = _render_outlier_grouping_option(st, review_scope)
 
     if st.button(
         "Confirm and continue",
@@ -619,14 +726,15 @@ def _render_outlier_review(
             reviews,
             cluster_id,
             observation_ids,
-            incorrect_ids,
+            tuple(confirmed_incorrect_ids) + tuple(newly_incorrect_ids),
         )
-        if incorrect_ids:
+        if newly_incorrect_ids:
             write_cluster_assignments(
                 merged_path,
-                assign_outliers_to_singleton_clusters(
+                assign_selected_outliers(
                     merged_assignments,
-                    incorrect_ids,
+                    newly_incorrect_ids,
+                    outlier_grouping,
                 ),
             )
         remaining_unreviewed_ids = [
@@ -652,6 +760,27 @@ def _render_outlier_review(
 
 def _selection_key(merged_path: Path, cluster_id: str) -> str:
     return f"merge-select::{merged_path.resolve()}::{cluster_id}"
+
+
+def _selected_cluster_ids_key(merged_path: Path) -> str:
+    return f"merge-selected-ids::{merged_path.resolve()}"
+
+
+def _update_cluster_selection(
+    st: Any,
+    merged_path: Path,
+    cluster_id: str,
+) -> None:
+    selected_ids = set(
+        st.session_state.get(_selected_cluster_ids_key(merged_path), ())
+    )
+    if st.session_state.get(_selection_key(merged_path, cluster_id), False):
+        selected_ids.add(cluster_id)
+    else:
+        selected_ids.discard(cluster_id)
+    st.session_state[_selected_cluster_ids_key(merged_path)] = tuple(
+        sorted(selected_ids)
+    )
 
 
 def _pending_selection_clear_key(merged_path: Path) -> str:
@@ -685,19 +814,28 @@ def _render_cluster_card(
             )
         if preview_candidates:
             preview_ids = representative_observation_ids(preview_candidates)
-            st.image(
-                [
-                    str(dataset.screenshot_path(observation_id))
-                    for observation_id in preview_ids
-                ],
-                width=92,
-            )
+            preview_columns = st.columns(len(preview_ids), gap="small")
+            for column, observation_id in zip(
+                preview_columns,
+                preview_ids,
+                strict=True,
+            ):
+                column.image(str(dataset.screenshot_path(observation_id)))
         else:
             st.warning("All states are marked as outliers.")
-        st.checkbox(
-            "Select cluster",
-            key=_selection_key(merged_path, cluster_id),
-        )
+        selection_key = _selection_key(merged_path, cluster_id)
+        selection_options = {
+            "key": selection_key,
+            "on_change": _update_cluster_selection,
+            "args": (st, merged_path, cluster_id),
+        }
+        if selection_key not in st.session_state:
+            selected_ids = st.session_state.get(
+                _selected_cluster_ids_key(merged_path),
+                (),
+            )
+            selection_options["value"] = cluster_id in selected_ids
+        st.checkbox("Select cluster", **selection_options)
         return st.button(
             "Review outliers",
             key=f"merge-review::{merged_path.resolve()}::{cluster_id}",
@@ -759,6 +897,8 @@ def _render_focused_cluster_review(
             ):
                 incorrect_ids.append(observation_id)
 
+    outlier_grouping = _render_outlier_grouping_option(st, review_scope)
+
     action_columns = st.columns((3, 1))
     if action_columns[0].button(
         "Confirm review",
@@ -775,9 +915,10 @@ def _render_focused_cluster_review(
         if incorrect_ids:
             write_cluster_assignments(
                 merged_path,
-                assign_outliers_to_singleton_clusters(
+                assign_selected_outliers(
                     merged_assignments,
                     incorrect_ids,
+                    outlier_grouping,
                 ),
             )
         st.session_state.pop(_focused_review_key(merged_path), None)
@@ -793,6 +934,10 @@ def _render_focused_cluster_review(
             review_scope,
             cluster_id,
             observation_ids,
+        )
+        st.session_state.pop(
+            _outlier_grouping_widget_key(review_scope),
+            None,
         )
         st.session_state.pop(_focused_review_key(merged_path), None)
         st.rerun()
@@ -852,11 +997,22 @@ def _render_merge_tab(
         _pending_selection_clear_key(merged_path),
         (),
     )
+    selected_ids = set(
+        st.session_state.get(_selected_cluster_ids_key(merged_path), ())
+    )
+    selected_ids.difference_update(pending_selection_ids)
+    st.session_state[_selected_cluster_ids_key(merged_path)] = tuple(
+        sorted(selected_ids)
+    )
     for cluster_id in pending_selection_ids:
         st.session_state[_selection_key(merged_path, cluster_id)] = False
 
     groups = build_cluster_groups(dataset, merged_assignments)
     cluster_ids = ordered_cluster_ids(groups)
+    selected_ids.intersection_update(cluster_ids)
+    st.session_state[_selected_cluster_ids_key(merged_path)] = tuple(
+        sorted(selected_ids)
+    )
     original_cluster_count = len(
         build_cluster_groups(dataset, original_assignments)
     )
@@ -926,11 +1082,7 @@ def _render_merge_tab(
     page_start = (int(page_number) - 1) * page_size
     page_ids = filtered_ids[page_start : page_start + page_size]
 
-    selected_ids = [
-        cluster_id
-        for cluster_id in cluster_ids
-        if st.session_state.get(_selection_key(merged_path, cluster_id), False)
-    ]
+    selected_ids = sorted(selected_ids)
     st.caption(
         f"Showing {len(page_ids)} of {len(filtered_ids)} matching clusters · "
         f"{len(selected_ids)} selected"
@@ -956,11 +1108,9 @@ def _render_merge_tab(
             st.session_state[focused_key] = requested_review_id
             st.rerun()
 
-    selected_ids = [
-        cluster_id
-        for cluster_id in cluster_ids
-        if st.session_state.get(_selection_key(merged_path, cluster_id), False)
-    ]
+    selected_ids = list(
+        st.session_state.get(_selected_cluster_ids_key(merged_path), ())
+    )
     if selected_ids:
         _render_merge_preview(
             st,
@@ -970,7 +1120,7 @@ def _render_merge_tab(
             outlier_ids_by_cluster,
         )
 
-    action_columns = st.columns((3, 1, 1))
+    action_columns = st.columns((3, 1, 1, 1))
     if action_columns[0].button(
         "Merge selected clusters",
         type="primary",
@@ -991,9 +1141,19 @@ def _render_merge_tab(
         st.toast(f"Merged into {merged_cluster_id}")
         st.rerun()
 
+    if action_columns[1].button(
+        "Unselect all",
+        disabled=not selected_ids,
+        use_container_width=True,
+    ):
+        st.session_state[_pending_selection_clear_key(merged_path)] = tuple(
+            selected_ids
+        )
+        st.rerun()
+
     history_key = f"merge-history::{merged_path.resolve()}"
     history = st.session_state.setdefault(history_key, [])
-    if action_columns[1].button(
+    if action_columns[2].button(
         "Undo last merge",
         disabled=not history,
         use_container_width=True,
@@ -1002,7 +1162,7 @@ def _render_merge_tab(
         write_cluster_assignments(merged_path, previous_assignments)
         st.rerun()
 
-    reset_requested = action_columns[2].button(
+    reset_requested = action_columns[3].button(
         "Reset all",
         disabled=merged_cluster_count == original_cluster_count,
         use_container_width=True,
