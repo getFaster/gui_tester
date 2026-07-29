@@ -9,6 +9,7 @@ from streamlit.testing.v1 import AppTest
 from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
+    CLUSTER_SORT_DICTIONARY,
     _default_merged_reviews_path,
     assign_outliers_to_same_cluster,
     assign_outliers_to_singleton_clusters,
@@ -461,6 +462,18 @@ class StatePipelineTest(unittest.TestCase):
         self.assertEqual(
             ["home", "singleton_a", "singleton_c"],
             ordered_cluster_ids(renamed_groups, groups),
+        )
+        self.assertEqual(
+            ["aaa", "singleton_c", "zzz"],
+            ordered_cluster_ids(
+                {
+                    "zzz": groups["group_b"],
+                    "aaa": groups["singleton_a"],
+                    "singleton_c": groups["singleton_c"],
+                },
+                groups,
+                CLUSTER_SORT_DICTIONARY,
+            ),
         )
 
         reviews = {

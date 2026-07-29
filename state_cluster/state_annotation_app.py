@@ -19,6 +19,12 @@ OUTLIER_GROUPING_OPTIONS = (
     OUTLIER_GROUPING_SINGLETONS,
     OUTLIER_GROUPING_TOGETHER,
 )
+CLUSTER_SORT_ORIGINAL = "ID (original order)"
+CLUSTER_SORT_DICTIONARY = "Dictionary order"
+CLUSTER_SORT_OPTIONS = (
+    CLUSTER_SORT_ORIGINAL,
+    CLUSTER_SORT_DICTIONARY,
+)
 
 
 def _records_by_key(path: Path, key: str) -> dict[str, dict[str, Any]]:
@@ -92,8 +98,17 @@ def build_cluster_groups(
 def ordered_cluster_ids(
     groups: dict[str, tuple[str, ...]],
     original_groups: dict[str, tuple[str, ...]] | None = None,
+    sort_mode: str = CLUSTER_SORT_ORIGINAL,
 ) -> list[str]:
-    """Put singleton groups last while preserving the original cluster order."""
+    """Order clusters by their original positions or current display names."""
+    if sort_mode == CLUSTER_SORT_DICTIONARY:
+        return sorted(
+            groups,
+            key=lambda cluster_id: (cluster_id.casefold(), cluster_id),
+        )
+    if sort_mode != CLUSTER_SORT_ORIGINAL:
+        raise ValueError(f"Unknown cluster sort mode: {sort_mode}")
+
     original_rank_by_observation: dict[str, int] = {}
     if original_groups is not None:
         original_cluster_ids = ordered_cluster_ids(original_groups)
@@ -713,7 +728,13 @@ def _render_outlier_review(
     merged_reviews_path: Path,
     merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
-    cluster_ids = ordered_cluster_ids(groups, original_groups)
+    sort_mode = st.radio(
+        "Sort outlier clusters by",
+        CLUSTER_SORT_OPTIONS,
+        horizontal=True,
+        key=f"outlier-sort::{merged_path.resolve()}",
+    )
+    cluster_ids = ordered_cluster_ids(groups, original_groups, sort_mode)
     active_reviews: dict[str, dict[str, Any]] = {}
     for cluster_id in cluster_ids:
         for review_collection in (merged_reviews, reviews):
@@ -1204,7 +1225,13 @@ def _render_merge_tab(
 
     groups = build_cluster_groups(dataset, merged_assignments)
     original_groups = build_cluster_groups(dataset, original_assignments)
-    cluster_ids = ordered_cluster_ids(groups, original_groups)
+    sort_mode = st.radio(
+        "Sort merge clusters by",
+        CLUSTER_SORT_OPTIONS,
+        horizontal=True,
+        key=f"merge-sort::{merged_path.resolve()}",
+    )
+    cluster_ids = ordered_cluster_ids(groups, original_groups, sort_mode)
     selected_ids.intersection_update(cluster_ids)
     st.session_state[_selected_cluster_ids_key(merged_path)] = tuple(
         sorted(selected_ids)

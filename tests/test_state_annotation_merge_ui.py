@@ -328,6 +328,38 @@ class StateAnnotationMergeUiTest(unittest.TestCase):
                 cluster_picker.options[1].startswith("cluster_0002 ·")
             )
 
+            outlier_sort = next(
+                radio
+                for radio in app.radio
+                if radio.label == "Sort outlier clusters by"
+            )
+            outlier_sort.set_value("Dictionary order").run()
+            cluster_picker = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to review"
+            )
+            self.assertTrue(
+                cluster_picker.options[0].startswith("cluster_0002 ·")
+            )
+            self.assertTrue(cluster_picker.options[1].startswith("home ·"))
+
+            merge_sort = next(
+                radio
+                for radio in app.radio
+                if radio.label == "Sort merge clusters by"
+            )
+            merge_sort.set_value("Dictionary order").run()
+            cluster_to_rename = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to rename"
+            )
+            self.assertEqual(
+                ["cluster_0002", "home"],
+                cluster_to_rename.options,
+            )
+
     def test_rename_cluster_updates_outlier_review_and_review_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
