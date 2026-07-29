@@ -1489,8 +1489,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         {**assignment, "source": args.output.stem}
         for assignment in original_assignments
     ]
-    if args.dedup_scope == DEDUP_SCOPE_WITHIN_CLUSTER:
+    warning_key = "within-cluster-deduplication-warning-emitted"
+    if (
+        args.dedup_scope == DEDUP_SCOPE_WITHIN_CLUSTER
+        and not st.session_state.get(warning_key, False)
+    ):
         warnings.warn(WITHIN_CLUSTER_NOTICE, stacklevel=2)
+        st.session_state[warning_key] = True
     reviews_path = _default_reviews_path(args, dataset.run_id)
     reviews = _records_by_key(reviews_path, "cluster_id")
     merged_reviews_path = reviews_path
