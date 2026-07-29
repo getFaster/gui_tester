@@ -20,6 +20,7 @@ from state_annotation_app import (
     ordered_cluster_ids,
     parse_args,
     representative_observation_ids,
+    rename_cluster_assignments,
     review_applies_to_cluster,
     review_is_current,
     save_cluster_review,
@@ -439,6 +440,16 @@ class StatePipelineTest(unittest.TestCase):
             cluster_ids,
         )
 
+        renamed_groups = {
+            "home": groups["group_b"],
+            "singleton_a": groups["singleton_a"],
+            "singleton_c": groups["singleton_c"],
+        }
+        self.assertEqual(
+            ["home", "singleton_a", "singleton_c"],
+            ordered_cluster_ids(renamed_groups, groups),
+        )
+
         reviews = {
             "group_b": {
                 "cluster_id": "group_b",
@@ -644,6 +655,44 @@ class StatePipelineTest(unittest.TestCase):
             ["cluster_a", "cluster_a", "cluster_a"],
             [record["auto_cluster_id"] for record in second_merge],
         )
+
+    def test_rename_cluster_assignments_preserves_membership(self):
+        assignments = [
+            {
+                "observation_id": "obs_000001",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_a",
+            },
+            {
+                "observation_id": "obs_000002",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_a",
+            },
+            {
+                "observation_id": "obs_000003",
+                "baseline": "structure_str",
+                "auto_cluster_id": "cluster_b",
+            },
+        ]
+
+        renamed, cluster_id = rename_cluster_assignments(
+            assignments,
+            "cluster_a",
+            "  home  ",
+        )
+
+        self.assertEqual("home", cluster_id)
+        self.assertEqual(
+            ["home", "home", "cluster_b"],
+            [record["auto_cluster_id"] for record in renamed],
+        )
+        self.assertEqual("cluster_a", assignments[0]["auto_cluster_id"])
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            rename_cluster_assignments(
+                assignments,
+                "cluster_a",
+                "cluster_b",
+            )
 
     def test_annotated_outliers_become_distinct_singleton_clusters(self):
         assignments = [

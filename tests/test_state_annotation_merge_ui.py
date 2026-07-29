@@ -160,6 +160,150 @@ def select_and_merge_two_clusters(app: AppTest) -> AppTest:
 
 
 class StateAnnotationMergeUiTest(unittest.TestCase):
+    def test_outlier_review_can_rename_current_cluster(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root)
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+
+            new_name_input = next(
+                text_input
+                for text_input in app.text_input
+                if text_input.label == "New name for this cluster"
+            )
+            new_name_input.input("home").run()
+            rename_button = next(
+                button
+                for button in app.button
+                if button.label == "Rename cluster"
+            )
+            rename_button.click().run()
+
+            self.assertEqual([], app.exception)
+            self.assertEqual(
+                {"home", "cluster_0002"},
+                {
+                    record["auto_cluster_id"]
+                    for record in read_jsonl(merged_clusters_path)
+                },
+            )
+            cluster_picker = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to review"
+            )
+            self.assertEqual("home", cluster_picker.value)
+            self.assertTrue(
+                any(
+                    option.startswith("home ·")
+                    for option in cluster_picker.options
+                )
+            )
+            self.assertFalse(
+                any(
+                    option.startswith("cluster_0001 ·")
+                    for option in cluster_picker.options
+                )
+            )
+            self.assertTrue(cluster_picker.options[0].startswith("home ·"))
+            self.assertTrue(
+                cluster_picker.options[1].startswith("cluster_0002 ·")
+            )
+
+    def test_rename_cluster_updates_outlier_review_and_review_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(
+                root,
+                review_first_cluster=True,
+            )
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+
+            cluster_to_rename = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to rename"
+            )
+            cluster_to_rename.set_value("cluster_0001").run()
+            new_name_input = next(
+                text_input
+                for text_input in app.text_input
+                if text_input.label == "New cluster name"
+            )
+            new_name_input.input("home").run()
+            rename_button = next(
+                button for button in app.button if button.label == "Rename"
+            )
+            rename_button.click().run()
+
+            self.assertEqual([], app.exception)
+            self.assertEqual(
+                {"home", "cluster_0002"},
+                {
+                    record["auto_cluster_id"]
+                    for record in read_jsonl(merged_clusters_path)
+                },
+            )
+            cluster_picker = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to review"
+            )
+            self.assertTrue(
+                any(option.startswith("home ·") for option in cluster_picker.options)
+            )
+            self.assertFalse(
+                any(
+                    option.startswith("cluster_0001 ·")
+                    for option in cluster_picker.options
+                )
+            )
+            self.assertEqual(
+                [
+                    {
+                        "cluster_id": "home",
+                        "observation_ids": ["obs_000001"],
+                        "incorrect_observation_ids": [],
+                        "status": "confirmed",
+                    }
+                ],
+                read_jsonl(merged_reviews_path),
+            )
+
     def test_outlier_review_reflects_merged_cluster_membership(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

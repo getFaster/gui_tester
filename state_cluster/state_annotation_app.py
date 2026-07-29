@@ -83,12 +83,35 @@ def build_cluster_groups(
 
 def ordered_cluster_ids(
     groups: dict[str, tuple[str, ...]],
+    original_groups: dict[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
-    """Put larger comparison groups first and singleton groups last."""
+    """Put singleton groups last while preserving the original cluster order."""
+    original_rank_by_observation: dict[str, int] = {}
+    if original_groups is not None:
+        original_cluster_ids = ordered_cluster_ids(original_groups)
+        original_rank_by_observation = {
+            observation_id: rank
+            for rank, cluster_id in enumerate(original_cluster_ids)
+            for observation_id in original_groups[cluster_id]
+        }
+
+    fallback_rank = len(original_groups or ())
     return sorted(
         groups,
         key=lambda cluster_id: (
             len(groups[cluster_id]) == 1,
+            min(
+                (
+                    original_rank_by_observation.get(
+                        observation_id,
+                        fallback_rank,
+                    )
+                    for observation_id in groups[cluster_id]
+                ),
+                default=fallback_rank,
+            )
+            if original_groups is not None
+            else cluster_id,
             cluster_id,
         ),
     )
@@ -239,6 +262,74 @@ def merge_cluster_assignments(
             updated["auto_cluster_id"] = merged_cluster_id
         merged_assignments.append(updated)
     return merged_assignments, merged_cluster_id
+
+
+def rename_cluster_assignments(
+    assignments: Sequence[dict[str, Any]],
+    cluster_id: str,
+    new_cluster_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Rename one cluster without changing its observation membership."""
+    normalized_cluster_id = new_cluster_id.strip()
+    if not normalized_cluster_id:
+        raise ValueError("The new cluster name cannot be empty")
+
+    existing_ids = {
+        str(record.get("auto_cluster_id")) for record in assignments
+    }
+    if cluster_id not in existing_ids:
+        raise ValueError(f"Unknown cluster selected for renaming: {cluster_id}")
+    if normalized_cluster_id == cluster_id:
+        raise ValueError("Enter a different cluster name")
+    if normalized_cluster_id in existing_ids:
+        raise ValueError(
+            f"A cluster named {normalized_cluster_id} already exists"
+        )
+
+    renamed_assignments: list[dict[str, Any]] = []
+    for record in assignments:
+        updated = dict(record)
+        if updated.get("auto_cluster_id") == cluster_id:
+            updated["auto_cluster_id"] = normalized_cluster_id
+        renamed_assignments.append(updated)
+    return renamed_assignments, normalized_cluster_id
+
+
+def _rename_cluster_with_review(
+    assignments: Sequence[dict[str, Any]],
+    merged_path: Path,
+    cluster_id: str,
+    new_cluster_id: str,
+    observation_ids: Sequence[str],
+    reviews: dict[str, dict[str, Any]],
+    merged_reviews_path: Path,
+    merged_reviews: dict[str, dict[str, Any]],
+) -> str:
+    """Rename a cluster and migrate its current review when one exists."""
+    renamed_assignments, normalized_name = rename_cluster_assignments(
+        assignments,
+        cluster_id,
+        new_cluster_id,
+    )
+    current_review = None
+    for review_collection in (merged_reviews, reviews):
+        candidate_review = review_collection.get(cluster_id)
+        if review_applies_to_cluster(candidate_review, observation_ids):
+            current_review = candidate_review
+            break
+
+    merged_review_changed = (
+        merged_reviews.pop(cluster_id, None) is not None
+    )
+    if current_review is not None:
+        renamed_review = dict(current_review)
+        renamed_review["cluster_id"] = normalized_name
+        merged_reviews[normalized_name] = renamed_review
+        merged_review_changed = True
+    if merged_review_changed:
+        _atomic_write_records(merged_reviews_path, merged_reviews)
+    write_cluster_assignments(merged_path, renamed_assignments)
+    return normalized_name
 
 
 def assign_outliers_to_singleton_clusters(
@@ -609,7 +700,7 @@ def _render_outlier_review(
     merged_reviews_path: Path,
     merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
-    cluster_ids = ordered_cluster_ids(groups)
+    cluster_ids = ordered_cluster_ids(groups, original_groups)
     active_reviews: dict[str, dict[str, Any]] = {}
     for cluster_id in cluster_ids:
         for review_collection in (merged_reviews, reviews):
@@ -689,6 +780,43 @@ def _render_outlier_review(
         ),
     )
     observation_ids = groups[cluster_id]
+
+    with st.expander("Rename this cluster"):
+        rename_columns = st.columns((4, 1))
+        new_cluster_name = rename_columns[0].text_input(
+            "New name for this cluster",
+            key=(
+                f"outlier-rename-value::{merged_path.resolve()}::"
+                f"{cluster_id}"
+            ),
+        )
+        rename_requested = rename_columns[1].button(
+            "Rename cluster",
+            use_container_width=True,
+            key=(
+                f"outlier-rename-submit::{merged_path.resolve()}::"
+                f"{cluster_id}"
+            ),
+        )
+        if rename_requested:
+            try:
+                normalized_name = _rename_cluster_with_review(
+                    merged_assignments,
+                    merged_path,
+                    cluster_id,
+                    new_cluster_name,
+                    observation_ids,
+                    reviews,
+                    merged_reviews_path,
+                    merged_reviews,
+                )
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state[navigation_key] = normalized_name
+                st.toast(f"Renamed {cluster_id} to {normalized_name}")
+                st.rerun()
+
     saved_review = active_reviews.get(cluster_id)
     saved_review_is_current = saved_review is not None
     review_membership_is_original = (
@@ -1062,7 +1190,8 @@ def _render_merge_tab(
         st.session_state[_selection_key(merged_path, cluster_id)] = False
 
     groups = build_cluster_groups(dataset, merged_assignments)
-    cluster_ids = ordered_cluster_ids(groups)
+    original_groups = build_cluster_groups(dataset, original_assignments)
+    cluster_ids = ordered_cluster_ids(groups, original_groups)
     selected_ids.intersection_update(cluster_ids)
     st.session_state[_selected_cluster_ids_key(merged_path)] = tuple(
         sorted(selected_ids)
@@ -1173,6 +1302,48 @@ def _render_merge_tab(
             selected_ids,
             outlier_ids_by_cluster,
         )
+
+    with st.expander("Rename a cluster"):
+        rename_columns = st.columns((2, 3, 1))
+        cluster_to_rename = rename_columns[0].selectbox(
+            "Cluster to rename",
+            cluster_ids,
+            key=f"rename-cluster::{merged_path.resolve()}",
+        )
+        new_cluster_name = rename_columns[1].text_input(
+            "New cluster name",
+            key=f"rename-value::{merged_path.resolve()}",
+        )
+        rename_requested = rename_columns[2].button(
+            "Rename",
+            use_container_width=True,
+        )
+        if rename_requested:
+            try:
+                normalized_name = _rename_cluster_with_review(
+                    merged_assignments,
+                    merged_path,
+                    cluster_to_rename,
+                    new_cluster_name,
+                    groups[cluster_to_rename],
+                    reviews,
+                    merged_reviews_path,
+                    merged_reviews,
+                )
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state.pop(
+                    f"rename-value::{merged_path.resolve()}",
+                    None,
+                )
+                st.session_state[
+                    _pending_selection_clear_key(merged_path)
+                ] = (cluster_to_rename,)
+                st.toast(
+                    f"Renamed {cluster_to_rename} to {normalized_name}"
+                )
+                st.rerun()
 
     action_columns = st.columns((3, 1, 1, 1))
     if action_columns[0].button(
