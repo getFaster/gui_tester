@@ -10,7 +10,7 @@ from torchvision.io import ImageReadMode, read_image
 
 from state_annotation_app import (
     CLUSTER_SORT_DICTIONARY,
-    _default_merged_reviews_path,
+    _default_reviews_path,
     assign_outliers_to_same_cluster,
     assign_outliers_to_singleton_clusters,
     build_cluster_groups,
@@ -38,15 +38,16 @@ from state_clustering import (
     perceptual_hash_clusters,
 )
 from state_dataset import StateDataset, read_jsonl
+from state_deduplicate import create_deduplication_file
 from state_features import difference_hash, hamming_distance
 
 
 def run_annotation_app_for_test(
     run_dir: str,
-    clusters_path: str,
+    annotations_path: str,
+    deduplication_path: str,
     reviews_path: str,
-    merged_clusters_path: str,
-    merged_reviews_path: str,
+    output_path: str,
 ) -> None:
     """Run the annotation app with isolated test output paths."""
     from state_annotation_app import main
@@ -55,65 +56,69 @@ def run_annotation_app_for_test(
         [
             "--run-dir",
             run_dir,
-            "--clusters",
-            clusters_path,
+            "--annotations",
+            annotations_path,
+            "--deduplication",
+            deduplication_path,
             "--reviews",
             reviews_path,
-            "--merged-clusters",
-            merged_clusters_path,
-            "--merged-reviews",
-            merged_reviews_path,
+            "--output",
+            output_path,
         ]
     )
 
 
 class StatePipelineTest(unittest.TestCase):
-    def test_default_merged_reviews_path_follows_normal_reviews(self):
-        args = type("Args", (), {"merged_reviews": None})()
+    def test_default_reviews_path_follows_output_name(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "reviews": None,
+                "output": Path(
+                    "state_data/run_001/annotations/wikipedia.jsonl"
+                ),
+            },
+        )()
         self.assertEqual(
-            Path("annotations/run_reviews_merged.jsonl"),
-            _default_merged_reviews_path(
+            Path("state_data/run_001/debug/wikipedia_reviews.jsonl"),
+            _default_reviews_path(
                 args,
-                Path("annotations/run_reviews.jsonl"),
+                "run_001",
             ),
         )
 
-    def test_explicit_merged_reviews_path_is_preserved(self):
+    def test_explicit_reviews_path_is_preserved(self):
         output_path = Path("custom/focused_reviews.jsonl")
-        args = type("Args", (), {"merged_reviews": output_path})()
+        args = type(
+            "Args",
+            (),
+            {"reviews": output_path, "output": Path("unused.jsonl")},
+        )()
         self.assertEqual(
             output_path,
-            _default_merged_reviews_path(
+            _default_reviews_path(
                 args,
-                Path("annotations/run_reviews.jsonl"),
+                "run_001",
             ),
         )
 
-    def test_parse_args_accepts_merged_reviews_output(self):
+    def test_parse_args_accepts_canonical_workflow_inputs(self):
         args = parse_args(
             [
                 "--run-dir",
                 "run_001",
-                "--clusters",
-                "clusters.jsonl",
-                "--merged-reviews",
-                "focused_reviews.jsonl",
+                "--annotations",
+                "structure_str.jsonl",
+                "--deduplication",
+                "deduplication.jsonl",
+                "--output",
+                "wikipedia.jsonl",
             ]
         )
-        self.assertEqual(Path("focused_reviews.jsonl"), args.merged_reviews)
-        self.assertFalse(args.strict_assignments)
-
-    def test_parse_args_accepts_strict_assignments(self):
-        args = parse_args(
-            [
-                "--run-dir",
-                "run_001",
-                "--clusters",
-                "clusters.jsonl",
-                "--strict-assignments",
-            ]
-        )
-        self.assertTrue(args.strict_assignments)
+        self.assertEqual(Path("structure_str.jsonl"), args.annotations)
+        self.assertEqual(Path("deduplication.jsonl"), args.deduplication)
+        self.assertEqual(Path("wikipedia.jsonl"), args.output)
 
     def test_difference_hash_is_deterministic_and_64_bits(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -181,16 +186,16 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": observation["observation_id"],
-                "baseline": "test",
-                "auto_cluster_id": "A" if index < 2 else "B",
+                "source": "test",
+                "cluster_id": "A" if index < 2 else "B",
             }
             for index, observation in enumerate(observations)
         ]
         annotations = [
             {
                 "observation_id": observation["observation_id"],
-                "manual_functional_state_label": "A" if index < 2 else "B",
-                "status": "valid",
+                "cluster_id": "A" if index < 2 else "B",
+                "source": "manual",
             }
             for index, observation in enumerate(observations)
         ]
@@ -295,8 +300,8 @@ class StatePipelineTest(unittest.TestCase):
                     json.dumps(
                         {
                             "observation_id": observation_id,
-                            "baseline": "test",
-                            "auto_cluster_id": "cluster_0001",
+                            "source": "test",
+                            "cluster_id": "cluster_0001",
                         }
                     )
                     + "\n"
@@ -305,17 +310,18 @@ class StatePipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
             reviews_path = root / "reviews.jsonl"
-            merged_clusters_path = root / "clusters_merged.jsonl"
-            merged_reviews_path = root / "reviews_merged.jsonl"
+            deduplication_path = root / "deduplication.jsonl"
+            output_path = root / "wikipedia.jsonl"
+            create_deduplication_file(run_dir, deduplication_path)
 
             app = AppTest.from_function(
                 run_annotation_app_for_test,
                 args=(
                     str(run_dir),
                     str(clusters_path),
+                    str(deduplication_path),
                     str(reviews_path),
-                    str(merged_clusters_path),
-                    str(merged_reviews_path),
+                    str(output_path),
                 ),
             ).run()
             self.assertEqual([], app.exception)
@@ -360,7 +366,7 @@ class StatePipelineTest(unittest.TestCase):
             )
             merged_groups = build_cluster_groups(
                 StateDataset.load(run_dir),
-                read_jsonl(merged_clusters_path),
+                read_jsonl(output_path),
             )
             self.assertEqual(2, len(merged_groups))
             self.assertTrue(
@@ -432,19 +438,19 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": "obs_000001",
-                "auto_cluster_id": "singleton_a",
+                "cluster_id": "singleton_a",
             },
             {
                 "observation_id": "obs_000002",
-                "auto_cluster_id": "group_b",
+                "cluster_id": "group_b",
             },
             {
                 "observation_id": "obs_000003",
-                "auto_cluster_id": "group_b",
+                "cluster_id": "group_b",
             },
             {
                 "observation_id": "obs_000004",
-                "auto_cluster_id": "singleton_c",
+                "cluster_id": "singleton_c",
             },
         ]
         groups = build_cluster_groups(dataset, assignments)
@@ -621,11 +627,11 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": "obs_000003",
-                "auto_cluster_id": "cluster_b",
+                "cluster_id": "cluster_b",
             },
             {
                 "observation_id": "obs_000001",
-                "auto_cluster_id": "cluster_a",
+                "cluster_id": "cluster_a",
             },
         ]
         self.assertEqual(
@@ -638,7 +644,7 @@ class StatePipelineTest(unittest.TestCase):
         complete_assignments = [
             {
                 "observation_id": observation["observation_id"],
-                "auto_cluster_id": "cluster_a",
+                "cluster_id": "cluster_a",
             }
             for observation in observations
         ]
@@ -678,7 +684,7 @@ class StatePipelineTest(unittest.TestCase):
                 [
                     {
                         "observation_id": "obs_000001",
-                        "auto_cluster_id": "cluster_a",
+                        "cluster_id": "cluster_a",
                     }
                 ],
                 strict_assignments=True,
@@ -710,7 +716,7 @@ class StatePipelineTest(unittest.TestCase):
                 [
                     {
                         "observation_id": "obs_unknown",
-                        "auto_cluster_id": "cluster_a",
+                        "cluster_id": "cluster_a",
                     }
                 ],
                 "Unknown assigned observation",
@@ -719,20 +725,20 @@ class StatePipelineTest(unittest.TestCase):
                 [
                     {
                         "observation_id": "obs_000001",
-                        "auto_cluster_id": "",
+                        "cluster_id": "",
                     }
                 ],
-                "invalid auto_cluster_id",
+                "invalid cluster_id",
             ),
             (
                 [
                     {
                         "observation_id": "obs_000001",
-                        "auto_cluster_id": "cluster_a",
+                        "cluster_id": "cluster_a",
                     },
                     {
                         "observation_id": "obs_000001",
-                        "auto_cluster_id": "cluster_b",
+                        "cluster_id": "cluster_b",
                     },
                 ],
                 "Duplicate assignment",
@@ -761,18 +767,18 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": "obs_000001",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_b",
+                "source": "structure_str",
+                "cluster_id": "cluster_b",
             },
             {
                 "observation_id": "obs_000002",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_a",
+                "source": "structure_str",
+                "cluster_id": "cluster_a",
             },
             {
                 "observation_id": "obs_000003",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_c",
+                "source": "structure_str",
+                "cluster_id": "cluster_c",
             },
         ]
         merged, cluster_id = merge_cluster_assignments(
@@ -782,16 +788,16 @@ class StatePipelineTest(unittest.TestCase):
         self.assertEqual("cluster_a", cluster_id)
         self.assertEqual(
             ["cluster_a", "cluster_a", "cluster_c"],
-            [record["auto_cluster_id"] for record in merged],
+            [record["cluster_id"] for record in merged],
         )
-        self.assertEqual("cluster_b", assignments[0]["auto_cluster_id"])
+        self.assertEqual("cluster_b", assignments[0]["cluster_id"])
 
     def test_merge_cluster_assignments_supports_transitive_merges(self):
         assignments = [
             {
                 "observation_id": f"obs_{index:06d}",
-                "baseline": "structure_str",
-                "auto_cluster_id": cluster_id,
+                "source": "structure_str",
+                "cluster_id": cluster_id,
             }
             for index, cluster_id in enumerate(
                 ["cluster_a", "cluster_b", "cluster_c"],
@@ -808,25 +814,25 @@ class StatePipelineTest(unittest.TestCase):
         )
         self.assertEqual(
             ["cluster_a", "cluster_a", "cluster_a"],
-            [record["auto_cluster_id"] for record in second_merge],
+            [record["cluster_id"] for record in second_merge],
         )
 
     def test_rename_cluster_assignments_preserves_membership(self):
         assignments = [
             {
                 "observation_id": "obs_000001",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_a",
+                "source": "structure_str",
+                "cluster_id": "cluster_a",
             },
             {
                 "observation_id": "obs_000002",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_a",
+                "source": "structure_str",
+                "cluster_id": "cluster_a",
             },
             {
                 "observation_id": "obs_000003",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_b",
+                "source": "structure_str",
+                "cluster_id": "cluster_b",
             },
         ]
 
@@ -839,9 +845,9 @@ class StatePipelineTest(unittest.TestCase):
         self.assertEqual("home", cluster_id)
         self.assertEqual(
             ["home", "home", "cluster_b"],
-            [record["auto_cluster_id"] for record in renamed],
+            [record["cluster_id"] for record in renamed],
         )
-        self.assertEqual("cluster_a", assignments[0]["auto_cluster_id"])
+        self.assertEqual("cluster_a", assignments[0]["cluster_id"])
         with self.assertRaisesRegex(ValueError, "already exists"):
             rename_cluster_assignments(
                 assignments,
@@ -853,8 +859,8 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": observation_id,
-                "baseline": "embedding",
-                "auto_cluster_id": "cluster_a",
+                "source": "embedding",
+                "cluster_id": "cluster_a",
             }
             for observation_id in ("state_1", "state_2", "state_3")
         ]
@@ -865,7 +871,7 @@ class StatePipelineTest(unittest.TestCase):
         )
         groups: dict[str, list[str]] = {}
         for record in updated:
-            groups.setdefault(record["auto_cluster_id"], []).append(
+            groups.setdefault(record["cluster_id"], []).append(
                 record["observation_id"]
             )
 
@@ -873,17 +879,17 @@ class StatePipelineTest(unittest.TestCase):
         self.assertTrue(
             all(len(observation_ids) == 1 for observation_ids in groups.values())
         )
-        self.assertEqual("cluster_a", updated[2]["auto_cluster_id"])
+        self.assertEqual("cluster_a", updated[2]["cluster_id"])
         self.assertTrue(
-            updated[0]["auto_cluster_id"].startswith("cluster_a__outlier_")
+            updated[0]["cluster_id"].startswith("cluster_a__outlier_")
         )
         self.assertNotEqual(
-            updated[0]["auto_cluster_id"],
-            updated[1]["auto_cluster_id"],
+            updated[0]["cluster_id"],
+            updated[1]["cluster_id"],
         )
         self.assertTrue(
             all(
-                record["auto_cluster_id"] == "cluster_a"
+                record["cluster_id"] == "cluster_a"
                 for record in assignments
             )
         )
@@ -892,8 +898,8 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": observation_id,
-                "baseline": "embedding",
-                "auto_cluster_id": "cluster_a",
+                "source": "embedding",
+                "cluster_id": "cluster_a",
             }
             for observation_id in ("state_1", "state_2", "state_3")
         ]
@@ -904,16 +910,16 @@ class StatePipelineTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            updated[0]["auto_cluster_id"],
-            updated[1]["auto_cluster_id"],
+            updated[0]["cluster_id"],
+            updated[1]["cluster_id"],
         )
         self.assertTrue(
-            updated[0]["auto_cluster_id"].startswith("outlier_group_")
+            updated[0]["cluster_id"].startswith("outlier_group_")
         )
-        self.assertEqual("cluster_a", updated[2]["auto_cluster_id"])
+        self.assertEqual("cluster_a", updated[2]["cluster_id"])
         self.assertTrue(
             all(
-                record["auto_cluster_id"] == "cluster_a"
+                record["cluster_id"] == "cluster_a"
                 for record in assignments
             )
         )
@@ -922,8 +928,8 @@ class StatePipelineTest(unittest.TestCase):
         assignments = [
             {
                 "observation_id": "obs_000001",
-                "baseline": "structure_str",
-                "auto_cluster_id": "cluster_a",
+                "source": "structure_str",
+                "cluster_id": "cluster_a",
                 "ignored_extra_field": True,
             }
         ]
@@ -935,8 +941,8 @@ class StatePipelineTest(unittest.TestCase):
             [
                 {
                     "observation_id": "obs_000001",
-                    "baseline": "structure_str",
-                    "auto_cluster_id": "cluster_a",
+                    "source": "structure_str",
+                    "cluster_id": "cluster_a",
                 }
             ],
             records,

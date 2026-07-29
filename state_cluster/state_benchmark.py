@@ -1,4 +1,4 @@
-"""Evaluate automatic state clusters against manual functional-state labels."""
+"""Compare automatic and manually corrected cluster annotation files."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from state_dataset import StateDataset, read_jsonl
+from state_dataset import StateDataset, load_annotations, validate_annotations
 
 
 def pairwise_metrics(
@@ -19,9 +19,7 @@ def pairwise_metrics(
     true_positive = false_positive = false_negative = true_negative = 0
     for first_index in range(len(ground_truth)):
         for second_index in range(first_index):
-            same_truth = (
-                ground_truth[first_index] == ground_truth[second_index]
-            )
+            same_truth = ground_truth[first_index] == ground_truth[second_index]
             same_prediction = predicted[first_index] == predicted[second_index]
             if same_truth and same_prediction:
                 true_positive += 1
@@ -31,7 +29,6 @@ def pairwise_metrics(
                 false_negative += 1
             else:
                 true_negative += 1
-
     precision = (
         true_positive / (true_positive + false_positive)
         if true_positive + false_positive
@@ -71,7 +68,7 @@ def pairwise_metrics(
 def manual_corrections_required(
     ground_truth: Sequence[str], predicted: Sequence[str]
 ) -> int:
-    """Count observations that differ from each predicted cluster's majority."""
+    """Count observations differing from each predicted cluster's majority."""
     labels_by_cluster: dict[str, list[str]] = defaultdict(list)
     for truth, prediction in zip(ground_truth, predicted, strict=True):
         labels_by_cluster[prediction].append(truth)
@@ -83,56 +80,49 @@ def manual_corrections_required(
 
 def evaluate_assignments(
     dataset: StateDataset,
-    assignments: Sequence[dict[str, Any]],
-    annotations: Sequence[dict[str, Any]],
-    *,
-    include_substate: bool = False,
+    assignments: Sequence[dict[str, str]],
+    reference: Sequence[dict[str, str]],
 ) -> dict[str, Any]:
-    assignment_by_id = {
-        record["observation_id"]: record["auto_cluster_id"]
+    """Evaluate the overlap of two validated assignment annotations."""
+    assignments = validate_annotations(dataset, assignments)
+    reference = validate_annotations(dataset, reference)
+    predicted_by_id = {
+        record["observation_id"]: record["cluster_id"]
         for record in assignments
     }
-    annotation_by_id = {
-        record["observation_id"]: record for record in annotations
+    reference_by_id = {
+        record["observation_id"]: record["cluster_id"] for record in reference
     }
-    observation_ids: list[str] = []
-    ground_truth: list[str] = []
-    predicted: list[str] = []
-    for observation in dataset.observations:
-        observation_id = observation["observation_id"]
-        annotation = annotation_by_id.get(observation_id)
-        if annotation is None or annotation.get("status") == "invalid":
-            continue
-        functional_label = annotation.get("manual_functional_state_label")
-        if not functional_label or observation_id not in assignment_by_id:
-            continue
-        label = str(functional_label)
-        if include_substate and annotation.get("manual_substate_label"):
-            label += "::" + str(annotation["manual_substate_label"])
-        observation_ids.append(observation_id)
-        ground_truth.append(label)
-        predicted.append(assignment_by_id[observation_id])
-
+    observation_ids = [
+        observation["observation_id"]
+        for observation in dataset.observations
+        if observation["observation_id"] in predicted_by_id
+        and observation["observation_id"] in reference_by_id
+    ]
     if len(observation_ids) < 2:
-        raise ValueError("At least two labeled observations are required")
+        raise ValueError(
+            "At least two observations shared by both annotations are required"
+        )
+    predicted = [predicted_by_id[observation_id] for observation_id in observation_ids]
+    ground_truth = [
+        reference_by_id[observation_id] for observation_id in observation_ids
+    ]
 
     from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
     result: dict[str, Any] = {
         "run_id": dataset.run_id,
-        "baseline": assignments[0].get("baseline") if assignments else None,
-        "include_substate": include_substate,
+        "predicted_source": assignments[0]["source"] if assignments else None,
+        "reference_source": reference[0]["source"] if reference else None,
         "evaluated_observations": len(observation_ids),
-        "ground_truth_clusters": len(set(ground_truth)),
+        "reference_clusters": len(set(ground_truth)),
         "predicted_clusters": len(set(predicted)),
         "adjusted_rand_index": adjusted_rand_score(ground_truth, predicted),
         "normalized_mutual_information": normalized_mutual_info_score(
-            ground_truth,
-            predicted,
+            ground_truth, predicted
         ),
         "manual_corrections_required": manual_corrections_required(
-            ground_truth,
-            predicted,
+            ground_truth, predicted
         ),
     }
     result.update(pairwise_metrics(ground_truth, predicted))
@@ -143,8 +133,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("assignments", type=Path)
-    parser.add_argument("annotations", type=Path)
-    parser.add_argument("--include-substate", action="store_true")
+    parser.add_argument("reference", type=Path)
     parser.add_argument("--output", type=Path)
     return parser.parse_args(argv)
 
@@ -154,9 +143,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset = StateDataset.load(args.run_dir)
     result = evaluate_assignments(
         dataset,
-        read_jsonl(args.assignments),
-        read_jsonl(args.annotations),
-        include_substate=args.include_substate,
+        load_annotations(dataset, args.assignments),
+        load_annotations(dataset, args.reference),
     )
     rendered = json.dumps(result, indent=2)
     if args.output is not None:

@@ -6,10 +6,18 @@ import argparse
 import hashlib
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Sequence
 
-from state_dataset import StateDataset, read_jsonl
+from state_dataset import StateDataset, load_annotations, read_jsonl
+from state_deduplicate import (
+    DEDUP_SCOPE_WITHIN_CLUSTER,
+    DEDUP_SCOPES,
+    WITHIN_CLUSTER_NOTICE,
+    load_deduplication_groups,
+    select_representative_ids,
+)
 
 
 REVIEW_IMAGE_WIDTH = 320
@@ -60,12 +68,12 @@ def build_cluster_groups(
     cluster_by_observation: dict[str, str] = {}
     for record in assignments:
         observation_id = record.get("observation_id")
-        cluster_id = record.get("auto_cluster_id")
+        cluster_id = record.get("cluster_id")
         if observation_id not in dataset.observations_by_id:
             raise ValueError(f"Unknown assigned observation: {observation_id}")
         if not isinstance(cluster_id, str) or not cluster_id:
             raise ValueError(
-                f"{observation_id} has an invalid auto_cluster_id"
+                f"{observation_id} has an invalid cluster_id"
             )
         if observation_id in cluster_by_observation:
             raise ValueError(f"Duplicate assignment: {observation_id}")
@@ -233,24 +241,24 @@ def write_cluster_assignments(
     with temporary_path.open("w", encoding="utf-8") as output:
         for record in assignments:
             observation_id = record.get("observation_id")
-            baseline = record.get("baseline")
-            cluster_id = record.get("auto_cluster_id")
+            source = record.get("source")
+            cluster_id = record.get("cluster_id")
             if not isinstance(observation_id, str) or not observation_id:
                 raise ValueError("Every assignment needs an observation_id")
-            if not isinstance(baseline, str) or not baseline:
+            if not isinstance(source, str) or not source:
                 raise ValueError(
-                    f"{observation_id} has an invalid baseline"
+                    f"{observation_id} has an invalid source"
                 )
             if not isinstance(cluster_id, str) or not cluster_id:
                 raise ValueError(
-                    f"{observation_id} has an invalid auto_cluster_id"
+                    f"{observation_id} has an invalid cluster_id"
                 )
             output.write(
                 json.dumps(
                     {
                         "observation_id": observation_id,
-                        "baseline": baseline,
-                        "auto_cluster_id": cluster_id,
+                        "cluster_id": cluster_id,
+                        "source": source,
                     },
                     ensure_ascii=False,
                 )
@@ -269,7 +277,7 @@ def merge_cluster_assignments(
         raise ValueError("Select at least two different clusters to merge")
 
     existing_ids = {
-        str(record.get("auto_cluster_id")) for record in assignments
+        str(record.get("cluster_id")) for record in assignments
     }
     missing_ids = sorted(selected_ids - existing_ids)
     if missing_ids:
@@ -281,8 +289,8 @@ def merge_cluster_assignments(
     merged_assignments: list[dict[str, Any]] = []
     for record in assignments:
         updated = dict(record)
-        if updated.get("auto_cluster_id") in selected_ids:
-            updated["auto_cluster_id"] = merged_cluster_id
+        if updated.get("cluster_id") in selected_ids:
+            updated["cluster_id"] = merged_cluster_id
         merged_assignments.append(updated)
     return merged_assignments, merged_cluster_id
 
@@ -298,7 +306,7 @@ def rename_cluster_assignments(
         raise ValueError("The new cluster name cannot be empty")
 
     existing_ids = {
-        str(record.get("auto_cluster_id")) for record in assignments
+        str(record.get("cluster_id")) for record in assignments
     }
     if cluster_id not in existing_ids:
         raise ValueError(f"Unknown cluster selected for renaming: {cluster_id}")
@@ -312,8 +320,8 @@ def rename_cluster_assignments(
     renamed_assignments: list[dict[str, Any]] = []
     for record in assignments:
         updated = dict(record)
-        if updated.get("auto_cluster_id") == cluster_id:
-            updated["auto_cluster_id"] = normalized_cluster_id
+        if updated.get("cluster_id") == cluster_id:
+            updated["cluster_id"] = normalized_cluster_id
         renamed_assignments.append(updated)
     return renamed_assignments, normalized_cluster_id
 
@@ -375,7 +383,7 @@ def assign_outliers_to_singleton_clusters(
     cluster_sizes: dict[str, int] = {}
     existing_cluster_ids: set[str] = set()
     for record in assignments:
-        cluster_id = record.get("auto_cluster_id")
+        cluster_id = record.get("cluster_id")
         if isinstance(cluster_id, str):
             existing_cluster_ids.add(cluster_id)
             cluster_sizes[cluster_id] = cluster_sizes.get(cluster_id, 0) + 1
@@ -384,7 +392,7 @@ def assign_outliers_to_singleton_clusters(
     for record in assignments:
         updated = dict(record)
         observation_id = updated.get("observation_id")
-        cluster_id = updated.get("auto_cluster_id")
+        cluster_id = updated.get("cluster_id")
         if (
             observation_id in outlier_ids
             and isinstance(cluster_id, str)
@@ -397,7 +405,7 @@ def assign_outliers_to_singleton_clusters(
             while singleton_id in existing_cluster_ids:
                 singleton_id = f"{prefix}{digest[:12]}_{collision_index}"
                 collision_index += 1
-            updated["auto_cluster_id"] = singleton_id
+            updated["cluster_id"] = singleton_id
             existing_cluster_ids.add(singleton_id)
         updated_assignments.append(updated)
     return updated_assignments
@@ -425,9 +433,9 @@ def assign_outliers_to_same_cluster(
     digest_source = "\0".join(sorted(outlier_ids)).encode("utf-8")
     digest = hashlib.sha256(digest_source).hexdigest()[:12]
     existing_cluster_ids = {
-        str(record["auto_cluster_id"])
+        str(record["cluster_id"])
         for record in assignments
-        if isinstance(record.get("auto_cluster_id"), str)
+        if isinstance(record.get("cluster_id"), str)
     }
     grouped_cluster_id = f"outlier_group_{digest}"
     collision_index = 2
@@ -435,7 +443,7 @@ def assign_outliers_to_same_cluster(
         existing_members = {
             record.get("observation_id")
             for record in assignments
-            if record.get("auto_cluster_id") == grouped_cluster_id
+            if record.get("cluster_id") == grouped_cluster_id
         }
         if existing_members == outlier_ids:
             break
@@ -446,7 +454,7 @@ def assign_outliers_to_same_cluster(
     for record in assignments:
         updated = dict(record)
         if updated.get("observation_id") in outlier_ids:
-            updated["auto_cluster_id"] = grouped_cluster_id
+            updated["cluster_id"] = grouped_cluster_id
         updated_assignments.append(updated)
     return updated_assignments
 
@@ -528,35 +536,42 @@ def current_outlier_observation_ids(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--clusters", type=Path, required=True)
+    parser.add_argument(
+        "--annotations",
+        type=Path,
+        required=True,
+        help="Read-only source cluster annotation JSONL.",
+    )
+    parser.add_argument(
+        "--deduplication",
+        type=Path,
+        required=True,
+        help="Annotation-independent deduplication JSONL.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Edited annotation JSONL; an existing file is resumed.",
+    )
     parser.add_argument(
         "--reviews",
         type=Path,
         help=(
-            "Review JSONL output. Defaults to "
-            "state_annotations/<run>_<cluster-file>_reviews.jsonl."
+            "Optional debugging JSONL for all cluster reviews. Defaults to "
+            "state_data/<run-id>/debug/<output-name>_reviews.jsonl."
         ),
     )
     parser.add_argument(
-        "--merged-clusters",
-        type=Path,
-        help=(
-            "Merged assignment JSONL output. Defaults to a _merged file beside "
-            "the original cluster assignments."
-        ),
+        "--dedup-scope",
+        choices=DEDUP_SCOPES,
+        default=DEDUP_SCOPE_WITHIN_CLUSTER,
     )
     parser.add_argument(
-        "--merged-reviews",
-        type=Path,
-        help=(
-            "Reviews created from the cluster-merging gallery. Defaults to a "
-            "_merged file beside the normal review output."
-        ),
-    )
-    parser.add_argument(
-        "--strict-assignments",
-        action="store_true",
-        help="Require a cluster assignment for every observation in the run.",
+        "--max-per-image",
+        type=int,
+        default=3,
+        help="Maximum representatives retained per exact-image group.",
     )
     args, _ = parser.parse_known_args(argv)
     return args
@@ -565,25 +580,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def _default_reviews_path(args: argparse.Namespace, run_id: str) -> Path:
     if args.reviews is not None:
         return args.reviews
-    return Path("state_annotations") / (
-        f"{run_id}_{args.clusters.stem}_reviews.jsonl"
-    )
-
-
-def _default_merged_clusters_path(args: argparse.Namespace) -> Path:
-    if args.merged_clusters is not None:
-        return args.merged_clusters
-    return args.clusters.with_name(f"{args.clusters.stem}_merged.jsonl")
-
-
-def _default_merged_reviews_path(
-    args: argparse.Namespace,
-    reviews_path: Path,
-) -> Path:
-    if args.merged_reviews is not None:
-        return args.merged_reviews
-    return reviews_path.with_name(
-        f"{reviews_path.stem}_merged{reviews_path.suffix}"
+    return args.output.parent.parent / "debug" / (
+        f"{args.output.stem}_reviews.jsonl"
     )
 
 
@@ -1158,7 +1156,7 @@ def _render_focused_cluster_review(
         st.session_state.pop(_focused_review_key(merged_path), None)
         st.rerun()
 
-    st.caption(f"Merged-cluster reviews: {reviews_path}")
+    st.caption(f"Review log: {reviews_path}")
 
 
 def _render_merge_preview(
@@ -1208,6 +1206,7 @@ def _render_merge_tab(
     reviews: dict[str, dict[str, Any]],
     merged_reviews_path: Path,
     merged_reviews: dict[str, dict[str, Any]],
+    representative_ids: Sequence[str] | None = None,
 ) -> None:
     pending_selection_ids = st.session_state.pop(
         _pending_selection_clear_key(merged_path),
@@ -1223,8 +1222,27 @@ def _render_merge_tab(
     for cluster_id in pending_selection_ids:
         st.session_state[_selection_key(merged_path, cluster_id)] = False
 
-    groups = build_cluster_groups(dataset, merged_assignments)
-    original_groups = build_cluster_groups(dataset, original_assignments)
+    representative_id_set = (
+        set(representative_ids)
+        if representative_ids is not None
+        else {
+            record["observation_id"] for record in original_assignments
+        }
+    )
+    display_assignments = [
+        record
+        for record in merged_assignments
+        if record["observation_id"] in representative_id_set
+    ]
+    display_original_assignments = [
+        record
+        for record in original_assignments
+        if record["observation_id"] in representative_id_set
+    ]
+    groups = build_cluster_groups(dataset, display_assignments)
+    original_groups = build_cluster_groups(
+        dataset, display_original_assignments
+    )
     sort_mode = st.radio(
         "Sort merge clusters by",
         CLUSTER_SORT_OPTIONS,
@@ -1237,7 +1255,7 @@ def _render_merge_tab(
         sorted(selected_ids)
     )
     original_cluster_count = len(
-        build_cluster_groups(dataset, original_assignments)
+        build_cluster_groups(dataset, display_original_assignments)
     )
     merged_cluster_count = len(cluster_ids)
     outlier_ids_by_cluster = {
@@ -1277,7 +1295,7 @@ def _render_merge_tab(
         "Clusters merged",
         original_cluster_count - merged_cluster_count,
     )
-    metric_columns[2].metric("States", len(dataset.observations))
+    metric_columns[2].metric("Representatives", len(representative_id_set))
 
     control_columns = st.columns((2, 1, 1))
     filter_text = control_columns[0].text_input(
@@ -1440,7 +1458,7 @@ def _render_merge_tab(
         )
         st.rerun()
 
-    st.caption(f"Merged assignments: {merged_path}")
+    st.caption(f"Edited annotation: {merged_path}")
     if history:
         st.caption("Undo history is available for this browser session.")
 
@@ -1450,41 +1468,51 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     args = parse_args(argv)
     dataset = StateDataset.load(args.run_dir)
-    original_assignments = read_jsonl(args.clusters)
-    original_groups = build_cluster_groups(
+    if args.annotations.resolve() == args.output.resolve():
+        raise ValueError("Output must not overwrite the source annotation")
+    original_assignments = load_annotations(dataset, args.annotations)
+    complete_original_groups = build_cluster_groups(
         dataset,
         original_assignments,
-        strict_assignments=args.strict_assignments,
     )
+    deduplication_groups = load_deduplication_groups(
+        dataset, args.deduplication
+    )
+    representative_ids = select_representative_ids(
+        dataset,
+        original_assignments,
+        deduplication_groups,
+        dedup_scope=args.dedup_scope,
+        max_per_image=args.max_per_image,
+    )
+    original_assignments = [
+        {**assignment, "source": args.output.stem}
+        for assignment in original_assignments
+    ]
+    if args.dedup_scope == DEDUP_SCOPE_WITHIN_CLUSTER:
+        warnings.warn(WITHIN_CLUSTER_NOTICE, stacklevel=2)
     reviews_path = _default_reviews_path(args, dataset.run_id)
     reviews = _records_by_key(reviews_path, "cluster_id")
-    merged_reviews_path = _default_merged_reviews_path(args, reviews_path)
-    if merged_reviews_path.resolve() == reviews_path.resolve():
-        raise ValueError(
-            "Merged-cluster reviews must not overwrite original reviews"
-        )
-    merged_reviews = _records_by_key(merged_reviews_path, "cluster_id")
-    merged_path = _default_merged_clusters_path(args)
-    if merged_path.resolve() == args.clusters.resolve():
-        raise ValueError("Merged output must not overwrite the input assignments")
+    merged_reviews_path = reviews_path
+    merged_reviews = reviews
+    merged_path = args.output
     merged_assignments = (
-        read_jsonl(merged_path)
+        load_annotations(dataset, merged_path)
         if merged_path.is_file()
         else original_assignments
     )
-    current_groups = build_cluster_groups(
+    complete_current_groups = build_cluster_groups(
         dataset,
         merged_assignments,
-        strict_assignments=args.strict_assignments,
     )
     original_observation_ids = {
         observation_id
-        for observation_ids in original_groups.values()
+        for observation_ids in complete_original_groups.values()
         for observation_id in observation_ids
     }
     current_observation_ids = {
         observation_id
-        for observation_ids in current_groups.values()
+        for observation_ids in complete_current_groups.values()
         for observation_id in observation_ids
     }
     if current_observation_ids != original_observation_ids:
@@ -1492,6 +1520,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             "Merged assignments must cover exactly the same observations as "
             "the original assignments"
         )
+    representative_id_set = set(representative_ids)
+    original_groups = build_cluster_groups(
+        dataset,
+        [
+            assignment
+            for assignment in original_assignments
+            if assignment["observation_id"] in representative_id_set
+        ],
+    )
+    current_groups = build_cluster_groups(
+        dataset,
+        [
+            assignment
+            for assignment in merged_assignments
+            if assignment["observation_id"] in representative_id_set
+        ],
+    )
 
     st.set_page_config(
         page_title="Cluster Verification",
@@ -1500,9 +1545,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     st.title("Cluster Verification")
     st.caption(
-        f"{dataset.run_id} · {len(original_observation_ids)} of "
-        f"{len(dataset.observations)} states"
+        f"{dataset.run_id} · {len(representative_ids)} representatives from "
+        f"{len(original_observation_ids)} annotated states"
     )
+    if args.dedup_scope == DEDUP_SCOPE_WITHIN_CLUSTER:
+        st.warning(WITHIN_CLUSTER_NOTICE)
 
     outlier_tab, merge_tab = st.tabs(("Outlier review", "Cluster merging"))
     with outlier_tab:
@@ -1528,6 +1575,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             reviews,
             merged_reviews_path,
             merged_reviews,
+            representative_ids,
         )
 
 

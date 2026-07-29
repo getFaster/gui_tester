@@ -418,8 +418,8 @@ def write_assignments(
                 json.dumps(
                     {
                         "observation_id": observation["observation_id"],
-                        "baseline": baseline,
-                        "auto_cluster_id": f"{baseline}_{label:04d}",
+                        "cluster_id": f"{baseline}_{label:04d}",
+                        "source": baseline,
                     }
                 )
                 + "\n"
@@ -445,7 +445,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--feature-dir", type=Path)
-    parser.add_argument("--output-dir", type=Path, default=Path("state_clusters"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("state_data"),
+        help=(
+            "Workflow-data root. Output defaults to "
+            "state_data/<run-id>/annotations/<baseline>.jsonl."
+        ),
+    )
     parser.add_argument("--distance-threshold", type=float, default=0.15)
     parser.add_argument("--max-hamming-distance", type=int, default=8)
     parser.add_argument("--clickable-weight", type=float, default=1.0)
@@ -545,7 +553,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                 distance_threshold=args.distance_threshold,
             )
 
-    output_path = args.output_dir / dataset.run_id / f"{baseline}.jsonl"
+    output_path = (
+        args.output_dir
+        / dataset.run_id
+        / "annotations"
+        / f"{baseline}.jsonl"
+    )
     write_assignments(output_path, dataset, baseline, labels)
     cluster_count = len(set(labels))
     print(

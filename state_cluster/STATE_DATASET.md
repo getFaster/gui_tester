@@ -1,149 +1,131 @@
 # DroidBot State Dataset Workflow
 
-## Collect a run
+The canonical workflow is:
 
-Collection uses DroidBot's existing fixed event interval. It does not poll or
-resize screenshots.
-
-```powershell
-python -m droidbot.start `
-  -a C:\path\to\app-prod-debug.apk `
-  -d emulator-5554 `
-  -o C:\path\to\output `
-  -policy dfs_greedy `
-  -interval 1 `
-  -count 100 `
-  --collect-dataset `
-  --dataset-run-id run_001
+```text
+Collect immutable dataset
+→ generate deduplication information once
+→ generate an automatic annotation
+→ manually edit a representative view
+→ benchmark against the corrected annotation
 ```
 
-The run is stored below `output/dataset/run_001`. A completed trajectory has
-one more observation than transition. Repeated DroidBot hashes still receive
-new observation IDs, and self-transitions remain in `transitions.jsonl`.
+## Canonical files
 
-## Validate and extract features
+```text
+droidbot/runs/dataset/run_006/       # immutable collector output
 
-All commands preserve the native screenshot files. The 432 by 768 emulator
-size is divisible by DINOv3's 16-pixel patch size.
-
-```powershell
-uv run python state_features.py C:\path\to\run_001 --extractor perceptual
-uv run python state_features.py C:\path\to\run_001 --extractor dino
-$env:PYTHONUTF8 = "1"  # required by PyTorch Inductor on CP950 Windows hosts
-uv run python state_features.py C:\path\to\run_001 --extractor grounding `
-  --grounding-checkpoint checkpoints\element_finder\best.pt
+state_data/run_006/
+    deduplication.jsonl
+    annotations/
+        structure_str.jsonl
+        wikipedia.jsonl
+    debug/
+        wikipedia_reviews.jsonl
 ```
 
-## Deduplicate exact screenshots
+`state_cluster/` contains Python source only. `state_data/` contains canonical
+workflow data. Feature caches, checkpoints, and metrics are derived artifacts
+under ignored `data/`. The old `state_clusters/` and `state_annotations/`
+directories are deprecated and should remain untouched until migrated data is
+verified.
 
-Create a separate observation-only dataset that keeps at most three evenly
-spaced occurrences of each exact screenshot:
+Every annotation record uses one schema:
+
+```json
+{"observation_id":"obs_000001","cluster_id":"Read_article","source":"structure_str"}
+```
+
+Annotation files may be partial. Observation IDs must exist in the raw run and
+may occur only once. `cluster_id` and `source` must be non-empty strings.
+Legacy automatic IDs, manual-label fields, and pairwise files are rejected.
+
+## Generate exact-screenshot groups
+
+Deduplication depends only on decoded RGB pixels and dimensions. It writes one
+group for every screenshot identity, including singletons, and never copies or
+changes the dataset:
 
 ```powershell
-uv run python state_deduplicate.py `
-  C:\path\to\run_001 `
-  C:\path\to\run_001_deduplicated `
+uv run .\state_cluster\state_deduplicate.py `
+  .\droidbot\runs\dataset\run_006 `
+  .\state_data\run_006\deduplication.jsonl
+```
+
+An existing file is protected. Use `--overwrite` only when intentionally
+regenerating it from the same immutable run.
+
+## Generate an automatic annotation
+
+```powershell
+uv run .\state_cluster\state_clustering.py `
+  .\droidbot\runs\dataset\run_006 `
+  --baseline structure_str
+```
+
+The default output is
+`state_data/run_006/annotations/structure_str.jsonl`. Learned baselines still
+accept `--feature-dir`; feature caches remain derived data.
+
+## Edit a fixed representative view
+
+```powershell
+uv run streamlit run .\state_cluster\state_annotation_app.py -- `
+  --run-dir .\droidbot\runs\dataset\run_006 `
+  --annotations .\state_data\run_006\annotations\structure_str.jsonl `
+  --deduplication .\state_data\run_006\deduplication.jsonl `
+  --output .\state_data\run_006\annotations\wikipedia.jsonl `
+  --reviews .\state_data\run_006\debug\wikipedia_reviews.jsonl `
+  --dedup-scope within-cluster `
   --max-per-image 3
 ```
 
-Screenshot identity is based on decoded RGB pixels and image dimensions, so
-PNG compression and metadata do not affect the result. The source run is not
-modified. The derived run has no transitions because globally removing
-observations cannot preserve the original event trajectory. Its
-`deduplication.jsonl` records every repeated-image group and which observation
-IDs were retained or discarded. Regenerate features, clusters, and annotations
-for the derived run instead of reusing outputs keyed to the source run.
+The app never writes the source annotation or raw run. It resumes an existing
+`--output`. Representative observation IDs are selected once from the source
+annotation, so merges do not change which observations are under review.
+Merges and renames apply to the complete output annotation; outlier decisions
+apply to the selected observations.
 
-To retain an existing clustering and its cluster IDs, filter an assignment
-file instead of copying the dataset:
+`within-cluster` is the default and preserves representation for every source
+cluster. It retains identical screenshots separately when their source cluster
+IDs differ. Use `--dedup-scope global` to select without cluster membership.
+The optional review log is debugging information and is not consumed by other
+workflow stages.
 
-```powershell
-uv run python state_deduplicate.py `
-  C:\path\to\run_006 `
-  state_clusters\run_006\structure_str_merged_deduplicated.jsonl `
-  --assignments state_clusters\run_006\structure_str_merged.jsonl `
-  --max-per-image 3
-```
-
-This mode compares screenshots only among observations with the same
-`auto_cluster_id`. It writes a subset of the original assignment records and a
-neighboring `_deduplication.jsonl` audit file. The original dataset, cluster
-IDs, and clustering file are unchanged. Because the output intentionally omits
-some observations, use it as a representative assignment subset for downstream
-analysis rather than as input to the annotation UI, which requires complete
-dataset coverage.
-
-## Build clustering baselines
-
-Categorical baselines do not require feature files:
+## Benchmark the corrected annotation
 
 ```powershell
-uv run python state_clustering.py C:\path\to\run_001 --baseline activity
-uv run python state_clustering.py C:\path\to\run_001 --baseline state_str
-uv run python state_clustering.py C:\path\to\run_001 --baseline structure_str
+uv run .\state_cluster\state_benchmark.py `
+  .\droidbot\runs\dataset\run_006 `
+  .\state_data\run_006\annotations\structure_str.jsonl `
+  .\state_data\run_006\annotations\wikipedia.jsonl
 ```
 
-Visual and learned baselines use the matching extractor directory:
+Only observations present in both partial annotation files are evaluated. The
+second file is the manually corrected reference.
+
+## Migration
+
+Migration creates new files and leaves old directories in place:
+
+```text
+state_clusters/run_006/structure_str.jsonl
+  → state_data/run_006/annotations/structure_str.jsonl
+
+state_clusters/run_006/structure_str_merged.jsonl
+  → state_data/run_006/annotations/wikipedia.jsonl
+```
+
+Convert `auto_cluster_id` to `cluster_id`, convert `baseline` to `source`, and
+preserve record order and cluster IDs. Generate `deduplication.jsonl` from the
+raw run with the command above. Keep useful review logs only under
+`state_data/run_006/debug/`.
+
+## Verification
 
 ```powershell
-uv run python state_clustering.py C:\path\to\run_001 --baseline perceptual `
-  --feature-dir state_features\run_001
-uv run python state_clustering.py C:\path\to\run_001 --baseline dino `
-  --feature-dir state_features\run_001\dino_global
-uv run python state_clustering.py C:\path\to\run_001 --baseline grounding `
-  --feature-dir state_features\run_001\grounding
-uv run python state_clustering.py C:\path\to\run_001 `
-  --baseline grounding_transition `
-  --feature-dir state_features\run_001\grounding
-uv run python state_clustering.py C:\path\to\run_001 `
-  --baseline element_matching `
-  --feature-dir state_features\run_001\grounding
+$env:PYTHONUTF8 = "1"
+$env:PYTHONPATH = "state_cluster;element_finder"
+uv run python -m unittest discover -s tests -v
+uv run python -m compileall state_cluster tests
 ```
-
-`element_matching` compares all contextual ElementFinder tile embeddings
-between each pair of screens. It computes clickable and scrollable scores
-separately, weights every tile pair by both sigmoid probabilities, and uses a
-bidirectional best match so an important element missing from either screen
-reduces similarity. The default class weights are equal. Use
-`--clickable-weight` and `--scrollable-weight` to change them,
-`--similarity-device cpu` to force CPU execution, or `--tile-chunk-size` to
-limit the temporary tile-pair matrix. Chunking remains an exact all-pairs
-comparison.
-
-Tune `--distance-threshold` on a development run before evaluating held-out
-runs. The initial `0.15` default is shared with the other embedding baselines
-and should be included in a threshold sweep rather than treated as calibrated
-for element matching.
-
-## Annotate and evaluate
-
-The annotation interface accepts partial assignment files by default. It
-displays the retained and total observation counts and only reviews assigned
-observations against the original run. Add `--strict-assignments` to require an
-assignment for every observation. Assignment files are JSON Lines regardless
-of whether their filename ends in `.jsonl` or `.json`.
-
-Start the local annotation interface with one baseline assignment:
-
-```powershell
-uv run streamlit run state_annotation_app.py -- `
-  --run-dir C:\path\to\run_001 `
-  --clusters state_clusters\run_001\grounding.jsonl `
-  --annotations state_annotations\run_001.jsonl `
-  --pairs state_annotations\run_001_pairs.jsonl
-```
-
-Assigning the same functional label across clusters merges them in the manual
-ground truth. Selecting only part of a cluster and assigning another label
-splits it. Invalid observations are excluded from evaluation.
-
-```powershell
-uv run python state_benchmark.py `
-  C:\path\to\run_001 `
-  state_clusters\run_001\grounding.jsonl `
-  state_annotations\run_001.jsonl `
-  --output state_clusters\run_001\grounding_metrics.json
-```
-
-Add `--include-substate` to evaluate the finer functional-state plus scroll
-substate labeling.

@@ -6,7 +6,16 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
+
+
+ABANDONED_ANNOTATION_FIELDS = frozenset(
+    {
+        "auto_cluster_id",
+        "manual_functional_state_label",
+        "manual_substate_label",
+    }
+)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -175,3 +184,69 @@ def load_assignments(paths: Iterable[str | Path]) -> dict[str, dict[str, Any]]:
                 raise ValueError(f"Assignment lacks observation_id: {record!r}")
             assignments.setdefault(observation_id, {}).update(record)
     return assignments
+
+
+def validate_annotations(
+    dataset: StateDataset,
+    records: Sequence[dict[str, Any]],
+    *,
+    require_complete: bool = False,
+) -> list[dict[str, str]]:
+    """Validate and normalize canonical cluster-assignment annotations."""
+    annotations: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for record in records:
+        abandoned_fields = ABANDONED_ANNOTATION_FIELDS.intersection(record)
+        if abandoned_fields:
+            raise ValueError(
+                "Abandoned annotation field(s): "
+                + ", ".join(sorted(abandoned_fields))
+            )
+        observation_id = record.get("observation_id")
+        if (
+            not isinstance(observation_id, str)
+            or observation_id not in dataset.observations_by_id
+        ):
+            raise ValueError(f"Unknown annotated observation: {observation_id}")
+        if observation_id in seen_ids:
+            raise ValueError(f"Duplicate annotation: {observation_id}")
+        cluster_id = record.get("cluster_id")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ValueError(f"{observation_id} has an invalid cluster_id")
+        source = record.get("source")
+        if not isinstance(source, str) or not source:
+            raise ValueError(f"{observation_id} has an invalid source")
+        seen_ids.add(observation_id)
+        annotations.append(
+            {
+                "observation_id": observation_id,
+                "cluster_id": cluster_id,
+                "source": source,
+            }
+        )
+
+    if require_complete:
+        missing_ids = [
+            observation["observation_id"]
+            for observation in dataset.observations
+            if observation["observation_id"] not in seen_ids
+        ]
+        if missing_ids:
+            raise ValueError(
+                "Missing cluster annotations for: " + ", ".join(missing_ids)
+            )
+    return annotations
+
+
+def load_annotations(
+    dataset: StateDataset,
+    path: str | Path,
+    *,
+    require_complete: bool = False,
+) -> list[dict[str, str]]:
+    """Load one canonical, possibly partial annotation JSONL file."""
+    return validate_annotations(
+        dataset,
+        read_jsonl(Path(path)),
+        require_complete=require_complete,
+    )

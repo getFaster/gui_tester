@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from state_dataset import StateDataset
+from state_dataset import StateDataset, validate_annotations
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -106,6 +106,52 @@ class StateDatasetTest(unittest.TestCase):
         write_jsonl(self.run_dir / "transitions.jsonl", [])
         with self.assertRaisesRegex(ValueError, "escapes run directory"):
             StateDataset.load(self.run_dir)
+
+    def test_validates_partial_canonical_annotations_in_given_order(self):
+        dataset = StateDataset.load(self.run_dir)
+        records = [
+            {
+                "observation_id": "obs_000003",
+                "cluster_id": "Read_article",
+                "source": "structure_str",
+            },
+            {
+                "observation_id": "obs_000001",
+                "cluster_id": "Home",
+                "source": "structure_str",
+            },
+        ]
+        self.assertEqual(records, validate_annotations(dataset, records))
+        with self.assertRaisesRegex(ValueError, "Missing cluster annotations"):
+            validate_annotations(dataset, records, require_complete=True)
+
+    def test_rejects_invalid_duplicate_and_abandoned_annotation_records(self):
+        dataset = StateDataset.load(self.run_dir)
+        valid = {
+            "observation_id": "obs_000001",
+            "cluster_id": "Home",
+            "source": "test",
+        }
+        cases = (
+            ([{**valid, "cluster_id": ""}], "invalid cluster_id"),
+            ([valid, valid], "Duplicate annotation"),
+            (
+                [{**valid, "observation_id": "obs_unknown"}],
+                "Unknown annotated observation",
+            ),
+            (
+                [{**valid, "manual_functional_state_label": "Home"}],
+                "Abandoned annotation field",
+            ),
+            (
+                [{**valid, "auto_cluster_id": "legacy"}],
+                "Abandoned annotation field",
+            ),
+        )
+        for records, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_annotations(dataset, records)
 
 
 if __name__ == "__main__":

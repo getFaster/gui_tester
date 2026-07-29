@@ -271,21 +271,27 @@ class ElementMatchingTest(unittest.TestCase):
             )
 
             records = read_jsonl(
-                output_dir / "run_test" / "element_matching.jsonl"
+                output_dir
+                / "run_test"
+                / "annotations"
+                / "element_matching.jsonl"
             )
-        self.assertEqual(
-            list(observation_ids),
-            [record["observation_id"] for record in records],
-        )
-        self.assertTrue(
-            all(record["baseline"] == "element_matching" for record in records)
-        )
-        self.assertTrue(
-            all(
-                record["auto_cluster_id"].startswith("element_matching_")
-                for record in records
+            self.assertEqual(
+                list(observation_ids),
+                [record["observation_id"] for record in records],
             )
-        )
+            self.assertTrue(
+                all(
+                    record["source"] == "element_matching"
+                    for record in records
+                )
+            )
+            self.assertTrue(
+                all(
+                    record["cluster_id"].startswith("element_matching_")
+                    for record in records
+                )
+            )
 
 
 if __name__ == "__main__":
