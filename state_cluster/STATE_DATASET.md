@@ -63,6 +63,12 @@ runs.
 
 ## Annotate and evaluate
 
+The annotation interface accepts partial assignment files by default. It
+displays the retained and total observation counts and only reviews assigned
+observations against the original run. Add `--strict-assignments` to require an
+assignment for every observation. Assignment files are JSON Lines regardless
+of whether their filename ends in `.jsonl` or `.json`.
+
 Start the local annotation interface with one baseline assignment:
 
 ```powershell

@@ -160,6 +160,107 @@ def select_and_merge_two_clusters(app: AppTest) -> AppTest:
 
 
 class StateAnnotationMergeUiTest(unittest.TestCase):
+    def test_stale_merged_assignments_with_different_coverage_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root)
+            merged_clusters_path.write_text(
+                json.dumps(read_jsonl(clusters_path)[0]) + "\n",
+                encoding="utf-8",
+            )
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+
+            self.assertEqual(1, len(app.exception))
+            self.assertIn(
+                "must cover exactly the same observations",
+                str(app.exception[0].value),
+            )
+
+    def test_partial_assignments_can_be_reviewed_and_merged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root, cluster_count=3)
+            retained_assignments = read_jsonl(clusters_path)[:2]
+            clusters_path.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in retained_assignments
+                ),
+                encoding="utf-8",
+            )
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+            self.assertTrue(
+                any(
+                    "2 of 3 states" in caption.value
+                    for caption in app.caption
+                )
+            )
+
+            confirm_button = next(
+                button
+                for button in app.button
+                if button.label == "Confirm and continue"
+            )
+            confirm_button.click().run()
+            self.assertEqual([], app.exception)
+            self.assertEqual(
+                ["obs_000001"],
+                read_jsonl(reviews_path)[0]["observation_ids"],
+            )
+
+            select_and_merge_two_clusters(app)
+            self.assertEqual([], app.exception)
+            merged_assignments = read_jsonl(merged_clusters_path)
+            self.assertEqual(
+                {"obs_000001", "obs_000002"},
+                {
+                    record["observation_id"]
+                    for record in merged_assignments
+                },
+            )
+            self.assertEqual(
+                1,
+                len(
+                    {
+                        record["auto_cluster_id"]
+                        for record in merged_assignments
+                    }
+                ),
+            )
+
     def test_outlier_review_can_rename_current_cluster(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

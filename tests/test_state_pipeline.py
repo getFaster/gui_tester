@@ -100,6 +100,19 @@ class StatePipelineTest(unittest.TestCase):
             ]
         )
         self.assertEqual(Path("focused_reviews.jsonl"), args.merged_reviews)
+        self.assertFalse(args.strict_assignments)
+
+    def test_parse_args_accepts_strict_assignments(self):
+        args = parse_args(
+            [
+                "--run-dir",
+                "run_001",
+                "--clusters",
+                "clusters.jsonl",
+                "--strict-assignments",
+            ]
+        )
+        self.assertTrue(args.strict_assignments)
 
     def test_difference_hash_is_deterministic_and_64_bits(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -576,7 +589,89 @@ class StatePipelineTest(unittest.TestCase):
             ),
         )
 
-    def test_cluster_review_rejects_missing_assignments(self):
+    def test_cluster_review_accepts_partial_assignments_by_default(self):
+        observations = (
+            {"observation_id": "obs_000001"},
+            {"observation_id": "obs_000002"},
+            {"observation_id": "obs_000003"},
+        )
+        dataset = StateDataset(
+            run_dir=Path("."),
+            manifest={"run_id": "run_001"},
+            observations=observations,
+            transitions=(),
+            observations_by_id={
+                observation["observation_id"]: observation
+                for observation in observations
+            },
+        )
+        assignments = [
+            {
+                "observation_id": "obs_000003",
+                "auto_cluster_id": "cluster_b",
+            },
+            {
+                "observation_id": "obs_000001",
+                "auto_cluster_id": "cluster_a",
+            },
+        ]
+        self.assertEqual(
+            {
+                "cluster_a": ("obs_000001",),
+                "cluster_b": ("obs_000003",),
+            },
+            build_cluster_groups(dataset, assignments),
+        )
+        complete_assignments = [
+            {
+                "observation_id": observation["observation_id"],
+                "auto_cluster_id": "cluster_a",
+            }
+            for observation in observations
+        ]
+        self.assertEqual(
+            {
+                "cluster_a": (
+                    "obs_000001",
+                    "obs_000002",
+                    "obs_000003",
+                )
+            },
+            build_cluster_groups(
+                dataset,
+                complete_assignments,
+                strict_assignments=True,
+            ),
+        )
+
+    def test_cluster_review_rejects_missing_assignments_in_strict_mode(self):
+        observations = (
+            {"observation_id": "obs_000001"},
+            {"observation_id": "obs_000002"},
+        )
+        dataset = StateDataset(
+            run_dir=Path("."),
+            manifest={"run_id": "run_001"},
+            observations=observations,
+            transitions=(),
+            observations_by_id={
+                observation["observation_id"]: observation
+                for observation in observations
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "Missing cluster assignments"):
+            build_cluster_groups(
+                dataset,
+                [
+                    {
+                        "observation_id": "obs_000001",
+                        "auto_cluster_id": "cluster_a",
+                    }
+                ],
+                strict_assignments=True,
+            )
+
+    def test_cluster_review_rejects_empty_assignments(self):
         observation = {"observation_id": "obs_000001"}
         dataset = StateDataset(
             run_dir=Path("."),
@@ -585,8 +680,55 @@ class StatePipelineTest(unittest.TestCase):
             transitions=(),
             observations_by_id={"obs_000001": observation},
         )
-        with self.assertRaisesRegex(ValueError, "Missing cluster assignments"):
+        with self.assertRaisesRegex(ValueError, "contains no assignments"):
             build_cluster_groups(dataset, [])
+
+    def test_cluster_review_rejects_malformed_partial_assignments(self):
+        observation = {"observation_id": "obs_000001"}
+        dataset = StateDataset(
+            run_dir=Path("."),
+            manifest={"run_id": "run_001"},
+            observations=(observation,),
+            transitions=(),
+            observations_by_id={"obs_000001": observation},
+        )
+        cases = (
+            (
+                [
+                    {
+                        "observation_id": "obs_unknown",
+                        "auto_cluster_id": "cluster_a",
+                    }
+                ],
+                "Unknown assigned observation",
+            ),
+            (
+                [
+                    {
+                        "observation_id": "obs_000001",
+                        "auto_cluster_id": "",
+                    }
+                ],
+                "invalid auto_cluster_id",
+            ),
+            (
+                [
+                    {
+                        "observation_id": "obs_000001",
+                        "auto_cluster_id": "cluster_a",
+                    },
+                    {
+                        "observation_id": "obs_000001",
+                        "auto_cluster_id": "cluster_b",
+                    },
+                ],
+                "Duplicate assignment",
+            ),
+        )
+        for assignments, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_cluster_groups(dataset, assignments)
 
     def test_cluster_review_rejects_flags_outside_cluster(self):
         with tempfile.TemporaryDirectory() as temp_dir:

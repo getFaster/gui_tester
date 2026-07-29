@@ -44,8 +44,13 @@ def _atomic_write_records(
 def build_cluster_groups(
     dataset: StateDataset,
     assignments: Sequence[dict[str, Any]],
+    *,
+    strict_assignments: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     """Validate assignments and group observations in dataset order."""
+    if not assignments:
+        raise ValueError("Assignment file contains no assignments")
+
     cluster_by_observation: dict[str, str] = {}
     for record in assignments:
         observation_id = record.get("observation_id")
@@ -60,20 +65,23 @@ def build_cluster_groups(
             raise ValueError(f"Duplicate assignment: {observation_id}")
         cluster_by_observation[observation_id] = cluster_id
 
-    missing_ids = [
-        observation["observation_id"]
-        for observation in dataset.observations
-        if observation["observation_id"] not in cluster_by_observation
-    ]
-    if missing_ids:
-        raise ValueError(
-            "Missing cluster assignments for: " + ", ".join(missing_ids)
-        )
+    if strict_assignments:
+        missing_ids = [
+            observation["observation_id"]
+            for observation in dataset.observations
+            if observation["observation_id"] not in cluster_by_observation
+        ]
+        if missing_ids:
+            raise ValueError(
+                "Missing cluster assignments for: " + ", ".join(missing_ids)
+            )
 
     grouped: dict[str, list[str]] = {}
     for observation in dataset.observations:
         observation_id = observation["observation_id"]
-        cluster_id = cluster_by_observation[observation_id]
+        cluster_id = cluster_by_observation.get(observation_id)
+        if cluster_id is None:
+            continue
         grouped.setdefault(cluster_id, []).append(observation_id)
     return {
         cluster_id: tuple(observation_ids)
@@ -529,6 +537,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Reviews created from the cluster-merging gallery. Defaults to a "
             "_merged file beside the normal review output."
         ),
+    )
+    parser.add_argument(
+        "--strict-assignments",
+        action="store_true",
+        help="Require a cluster assignment for every observation in the run.",
     )
     args, _ = parser.parse_known_args(argv)
     return args
@@ -1411,7 +1424,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     dataset = StateDataset.load(args.run_dir)
     original_assignments = read_jsonl(args.clusters)
-    build_cluster_groups(dataset, original_assignments)
+    original_groups = build_cluster_groups(
+        dataset,
+        original_assignments,
+        strict_assignments=args.strict_assignments,
+    )
     reviews_path = _default_reviews_path(args, dataset.run_id)
     reviews = _records_by_key(reviews_path, "cluster_id")
     merged_reviews_path = _default_merged_reviews_path(args, reviews_path)
@@ -1428,8 +1445,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         if merged_path.is_file()
         else original_assignments
     )
-    original_groups = build_cluster_groups(dataset, original_assignments)
-    current_groups = build_cluster_groups(dataset, merged_assignments)
+    current_groups = build_cluster_groups(
+        dataset,
+        merged_assignments,
+        strict_assignments=args.strict_assignments,
+    )
+    original_observation_ids = {
+        observation_id
+        for observation_ids in original_groups.values()
+        for observation_id in observation_ids
+    }
+    current_observation_ids = {
+        observation_id
+        for observation_ids in current_groups.values()
+        for observation_id in observation_ids
+    }
+    if current_observation_ids != original_observation_ids:
+        raise ValueError(
+            "Merged assignments must cover exactly the same observations as "
+            "the original assignments"
+        )
 
     st.set_page_config(
         page_title="Cluster Verification",
@@ -1437,7 +1472,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         layout="wide",
     )
     st.title("Cluster Verification")
-    st.caption(f"{dataset.run_id} · {len(dataset.observations)} states")
+    st.caption(
+        f"{dataset.run_id} · {len(original_observation_ids)} of "
+        f"{len(dataset.observations)} states"
+    )
 
     outlier_tab, merge_tab = st.tabs(("Outlier review", "Cluster merging"))
     with outlier_tab:
