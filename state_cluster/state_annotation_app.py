@@ -131,6 +131,24 @@ def review_is_current(
     )
 
 
+def review_applies_to_cluster(
+    review: dict[str, Any] | None,
+    observation_ids: Sequence[str],
+) -> bool:
+    """Return whether a review describes the cluster's current members."""
+    if review_is_current(review, observation_ids):
+        return True
+    if not review or review.get("status") != "confirmed":
+        return False
+    incorrect_ids = set(review.get("incorrect_observation_ids", ()))
+    accepted_ids = [
+        observation_id
+        for observation_id in review.get("observation_ids", ())
+        if observation_id not in incorrect_ids
+    ]
+    return accepted_ids == list(observation_ids)
+
+
 def save_cluster_review(
     path: Path,
     existing: dict[str, dict[str, Any]],
@@ -583,23 +601,47 @@ def _render_outlier_review(
     st: Any,
     dataset: StateDataset,
     groups: dict[str, tuple[str, ...]],
+    original_groups: dict[str, tuple[str, ...]],
     merged_assignments: Sequence[dict[str, Any]],
     merged_path: Path,
     reviews_path: Path,
     reviews: dict[str, dict[str, Any]],
+    merged_reviews_path: Path,
+    merged_reviews: dict[str, dict[str, Any]],
 ) -> None:
     cluster_ids = ordered_cluster_ids(groups)
+    active_reviews: dict[str, dict[str, Any]] = {}
+    for cluster_id in cluster_ids:
+        for review_collection in (merged_reviews, reviews):
+            candidate_review = review_collection.get(cluster_id)
+            if review_applies_to_cluster(
+                candidate_review,
+                groups[cluster_id],
+            ):
+                active_reviews[cluster_id] = candidate_review
+                break
     reviewed_ids = [
         cluster_id
         for cluster_id in cluster_ids
-        if review_is_current(reviews.get(cluster_id), groups[cluster_id])
+        if cluster_id in active_reviews
     ]
     pending_ids = [
         cluster_id
         for cluster_id in cluster_ids
         if cluster_id not in reviewed_ids
     ]
-    flagged = flagged_observations(cluster_ids, groups, reviews)
+    flagged = {
+        cluster_id: tuple(
+            active_reviews[cluster_id].get(
+                "incorrect_observation_ids",
+                (),
+            )
+        )
+        for cluster_id in cluster_ids
+        if active_reviews.get(cluster_id, {}).get(
+            "incorrect_observation_ids"
+        )
+    }
     flagged_count = sum(len(ids) for ids in flagged.values())
     total_clusters = len(cluster_ids)
     completed_clusters = len(reviewed_ids)
@@ -642,19 +684,28 @@ def _render_outlier_review(
         key=picker_key,
         format_func=lambda candidate_id: (
             f"{candidate_id} · "
-            f"{len(groups[candidate_id]) - len(flagged.get(candidate_id, ()))} "
-            "state(s) · "
+            f"{len(groups[candidate_id])} state(s) · "
             f"{'Reviewed' if candidate_id in reviewed_id_set else 'Unreviewed'}"
         ),
     )
     observation_ids = groups[cluster_id]
-    saved_review = reviews.get(cluster_id)
-    saved_review_is_current = review_is_current(
-        saved_review,
-        observation_ids,
+    saved_review = active_reviews.get(cluster_id)
+    saved_review_is_current = saved_review is not None
+    review_membership_is_original = (
+        original_groups.get(cluster_id) == observation_ids
+    )
+    target_reviews_path = (
+        reviews_path
+        if review_membership_is_original
+        else merged_reviews_path
+    )
+    target_reviews = (
+        reviews if review_membership_is_original else merged_reviews
     )
     confirmed_incorrect_ids = (
-        set(saved_review.get("incorrect_observation_ids", ()))
+        set(saved_review.get("incorrect_observation_ids", ())).intersection(
+            observation_ids
+        )
         if saved_review_is_current and saved_review is not None
         else set()
     )
@@ -664,8 +715,8 @@ def _render_outlier_review(
         if observation_id not in confirmed_incorrect_ids
     )
     review_scope = _review_widget_scope(
-        "original",
-        reviews_path,
+        "current",
+        target_reviews_path,
         cluster_id,
         observation_ids,
     )
@@ -722,8 +773,8 @@ def _render_outlier_review(
         use_container_width=True,
     ):
         save_cluster_review(
-            reviews_path,
-            reviews,
+            target_reviews_path,
+            target_reviews,
             cluster_id,
             observation_ids,
             tuple(confirmed_incorrect_ids) + tuple(newly_incorrect_ids),
@@ -740,9 +791,12 @@ def _render_outlier_review(
         remaining_unreviewed_ids = [
             candidate_id
             for candidate_id in cluster_ids
-            if not review_is_current(
-                reviews.get(candidate_id),
-                groups[candidate_id],
+            if not any(
+                review_applies_to_cluster(
+                    review_collection.get(candidate_id),
+                    groups[candidate_id],
+                )
+                for review_collection in (merged_reviews, reviews)
             )
         ]
         next_cluster_id = next_unreviewed_cluster_id(
@@ -1204,6 +1258,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         else original_assignments
     )
     original_groups = build_cluster_groups(dataset, original_assignments)
+    current_groups = build_cluster_groups(dataset, merged_assignments)
 
     st.set_page_config(
         page_title="Cluster Verification",
@@ -1218,11 +1273,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         _render_outlier_review(
             st,
             dataset,
+            current_groups,
             original_groups,
             merged_assignments,
             merged_path,
             reviews_path,
             reviews,
+            merged_reviews_path,
+            merged_reviews,
         )
     with merge_tab:
         _render_merge_tab(

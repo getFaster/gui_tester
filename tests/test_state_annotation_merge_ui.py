@@ -160,6 +160,80 @@ def select_and_merge_two_clusters(app: AppTest) -> AppTest:
 
 
 class StateAnnotationMergeUiTest(unittest.TestCase):
+    def test_outlier_review_reflects_merged_cluster_membership(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                run_dir,
+                clusters_path,
+                reviews_path,
+                merged_clusters_path,
+                merged_reviews_path,
+            ) = create_two_cluster_fixture(root)
+
+            app = AppTest.from_function(
+                run_annotation_app_for_merge_test,
+                args=(
+                    str(run_dir),
+                    str(clusters_path),
+                    str(reviews_path),
+                    str(merged_clusters_path),
+                    str(merged_reviews_path),
+                ),
+            ).run()
+            self.assertEqual([], app.exception)
+            select_and_merge_two_clusters(app)
+
+            cluster_picker = next(
+                selectbox
+                for selectbox in app.selectbox
+                if selectbox.label == "Cluster to review"
+            )
+            self.assertEqual("cluster_0001", cluster_picker.value)
+            self.assertEqual(1, len(cluster_picker.options))
+            self.assertIn("2 state(s)", cluster_picker.options[0])
+            current_review_checkboxes = [
+                checkbox
+                for checkbox in app.checkbox
+                if checkbox.label == "Does not belong"
+                and "incorrect::current::" in str(checkbox.key)
+            ]
+            self.assertEqual(2, len(current_review_checkboxes))
+            self.assertTrue(
+                any(
+                    "obs_000001" in str(checkbox.key)
+                    for checkbox in current_review_checkboxes
+                )
+            )
+            self.assertTrue(
+                any(
+                    "obs_000002" in str(checkbox.key)
+                    for checkbox in current_review_checkboxes
+                )
+            )
+
+            confirm_button = next(
+                button
+                for button in app.button
+                if button.label == "Confirm and continue"
+            )
+            confirm_button.click().run()
+            self.assertFalse(reviews_path.exists())
+            self.assertEqual(
+                [
+                    {
+                        "cluster_id": "cluster_0001",
+                        "observation_ids": [
+                            "obs_000001",
+                            "obs_000002",
+                        ],
+                        "incorrect_observation_ids": [],
+                        "status": "confirmed",
+                    }
+                ],
+                read_jsonl(merged_reviews_path),
+            )
+
     def test_merged_review_can_group_selected_outliers_together(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -196,7 +270,7 @@ class StateAnnotationMergeUiTest(unittest.TestCase):
                 checkbox
                 for checkbox in app.checkbox
                 if checkbox.label == "Does not belong"
-                and "merged" in str(checkbox.key)
+                and "incorrect::merged::" in str(checkbox.key)
             ]
             self.assertEqual(2, len(merged_outlier_checkboxes))
             merged_outlier_checkboxes[0].check().run()
@@ -204,7 +278,7 @@ class StateAnnotationMergeUiTest(unittest.TestCase):
                 checkbox
                 for checkbox in app.checkbox
                 if checkbox.label == "Does not belong"
-                and "merged" in str(checkbox.key)
+                and "incorrect::merged::" in str(checkbox.key)
             ]
             merged_outlier_checkboxes[1].check().run()
 
@@ -213,7 +287,7 @@ class StateAnnotationMergeUiTest(unittest.TestCase):
                 for radio in app.radio
                 if radio.label
                 == "How should the selected outliers be clustered?"
-                and "merged" in str(radio.key)
+                and "outlier-grouping::merged::" in str(radio.key)
             )
             merged_grouping_radio.set_value("together").run()
             confirm_button = next(

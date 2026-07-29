@@ -20,6 +20,7 @@ from state_annotation_app import (
     ordered_cluster_ids,
     parse_args,
     representative_observation_ids,
+    review_applies_to_cluster,
     review_is_current,
     save_cluster_review,
     write_cluster_assignments,
@@ -357,7 +358,7 @@ class StatePipelineTest(unittest.TestCase):
                 checkbox
                 for checkbox in app.checkbox
                 if checkbox.label == "Does not belong"
-                and "original" in str(checkbox.key)
+                and "incorrect::current::" in str(checkbox.key)
             ]
             self.assertEqual(1, len(visible_outlier_checkboxes))
             self.assertIn(
@@ -498,6 +499,24 @@ class StatePipelineTest(unittest.TestCase):
             review_is_current(
                 review,
                 ["obs_000001", "obs_000002"],
+            )
+        )
+
+    def test_review_applies_to_cluster_after_confirmed_outlier_moves_out(self):
+        review = {
+            "cluster_id": "cluster_a",
+            "observation_ids": ["obs_000001", "obs_000002"],
+            "incorrect_observation_ids": ["obs_000002"],
+            "status": "confirmed",
+        }
+
+        self.assertTrue(
+            review_applies_to_cluster(review, ["obs_000001"])
+        )
+        self.assertFalse(
+            review_applies_to_cluster(
+                review,
+                ["obs_000001", "obs_000003"],
             )
         )
 
