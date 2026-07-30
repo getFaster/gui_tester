@@ -104,6 +104,45 @@ uv run .\state_cluster\state_benchmark.py `
 Only observations present in both partial annotation files are evaluated. The
 second file is the manually corrected reference.
 
+## Tune the element-matching threshold
+
+First extract grounding features only for the first observation in every exact
+screenshot group:
+
+```powershell
+uv run .\state_cluster\state_features.py `
+  .\droidbot\runs\dataset\run_006 `
+  --extractor grounding `
+  --deduplication .\state_data\run_006\deduplication.jsonl
+```
+
+The exhaustive sweep clusters those representatives, computes the
+element-matching distance matrix once, builds one complete average-linkage
+tree, and evaluates every threshold that produces a distinct clustering.
+
+```powershell
+uv run .\state_cluster\state_threshold_sweep.py `
+  .\droidbot\runs\dataset\run_006 `
+  .\state_features\run_006\grounding `
+  .\state_data\run_006\annotations\final_annotation.jsonl `
+  .\state_data\run_006\deduplication.jsonl
+```
+
+The default artifact directory is
+`data/run_006/element_matching_threshold_sweep/`. It contains:
+
+- `threshold_sweep.csv`: pairwise F1, ARI, and NMI for every effective
+  threshold over the deduplicated representatives;
+- `summary.json`: the current `0.15` result and the best thresholds selected by
+  pairwise F1, then ARI, then NMI;
+- `threshold_metrics.svg`: the full-view metric curves;
+- `best_assignments.jsonl`: assignments at the best full-view threshold; and
+- `distance_matrix.pt`: the computed screen-distance matrix.
+
+The selected value is a benchmark-specific optimum when the same manual
+annotation is used for threshold selection and reporting. Freeze it before
+evaluating generalization on another independently annotated run or app.
+
 ## Migration
 
 Migration creates new files and leaves old directories in place:

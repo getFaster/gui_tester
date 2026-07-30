@@ -134,11 +134,27 @@ def distance_matrix_clusters(
 
 
 def load_feature_payloads(
-    dataset: StateDataset, feature_dir: Path
+    dataset: StateDataset,
+    feature_dir: Path,
+    observation_ids: Sequence[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    dataset_ids = {
+        observation["observation_id"] for observation in dataset.observations
+    }
+    selected_ids = (
+        list(observation_ids)
+        if observation_ids is not None
+        else [observation["observation_id"] for observation in dataset.observations]
+    )
+    unknown_ids = [
+        observation_id
+        for observation_id in selected_ids
+        if observation_id not in dataset_ids
+    ]
+    if unknown_ids:
+        raise ValueError("Unknown feature observations: " + ", ".join(unknown_ids))
     payloads: dict[str, dict[str, Any]] = {}
-    for observation in dataset.observations:
-        observation_id = observation["observation_id"]
+    for observation_id in selected_ids:
         path = feature_dir / f"{observation_id}.pt"
         if not path.is_file():
             raise FileNotFoundError(f"Missing feature file: {path}")

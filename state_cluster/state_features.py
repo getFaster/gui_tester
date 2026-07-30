@@ -15,6 +15,7 @@ from torchvision.transforms.functional import rgb_to_grayscale, resize
 
 from dinov3 import DINOv3FeatureExtractor
 from state_dataset import StateDataset
+from state_deduplicate import load_deduplication_groups
 
 
 def difference_hash(image: torch.Tensor) -> str:
@@ -88,6 +89,7 @@ def extract_dino_features(
     output_dir: Path,
     *,
     grounding_checkpoint: Path | None = None,
+    observation_ids: Sequence[str] | None = None,
 ) -> None:
     dino = DINOv3FeatureExtractor()
     element_finder = None
@@ -102,8 +104,12 @@ def extract_dino_features(
         extractor_name = "grounding"
 
     feature_dir = output_dir / extractor_name
-    for observation in dataset.observations:
-        observation_id = observation["observation_id"]
+    selected_ids = (
+        list(observation_ids)
+        if observation_ids is not None
+        else [observation["observation_id"] for observation in dataset.observations]
+    )
+    for observation_id in selected_ids:
         image = read_image(
             str(dataset.screenshot_path(observation_id)),
             mode=ImageReadMode.RGB,
@@ -147,7 +153,8 @@ def extract_dino_features(
             ),
             "native_resolution": True,
             "patch_size": dino.patch_size,
-            "observation_count": len(dataset.observations),
+            "observation_count": len(selected_ids),
+            "dataset_observation_count": len(dataset.observations),
         },
     )
 
@@ -166,6 +173,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path("checkpoints/element_finder/best.pt"),
     )
+    parser.add_argument(
+        "--deduplication",
+        type=Path,
+        help=(
+            "Extract only the first observation from every validated "
+            "exact-screenshot group."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -173,7 +188,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     dataset = StateDataset.load(args.run_dir)
     output_dir = args.output_dir / dataset.run_id
+    selected_ids = None
+    if args.deduplication is not None:
+        groups = load_deduplication_groups(dataset, args.deduplication)
+        selected_ids = [group["observation_ids"][0] for group in groups]
     if args.extractor == "perceptual":
+        if selected_ids is not None:
+            raise ValueError(
+                "--deduplication currently supports dino and grounding "
+                "feature extraction"
+            )
         output_path = extract_perceptual_hashes(dataset, output_dir)
         print(f"Wrote {output_path}")
         return
@@ -182,8 +206,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         dataset,
         output_dir,
         grounding_checkpoint=checkpoint,
+        observation_ids=selected_ids,
     )
-    print(f"Wrote {args.extractor} features below {output_dir}")
+    observation_count = (
+        len(selected_ids) if selected_ids is not None else len(dataset.observations)
+    )
+    print(
+        f"Wrote {args.extractor} features for {observation_count} observations "
+        f"below {output_dir}"
+    )
 
 
 if __name__ == "__main__":

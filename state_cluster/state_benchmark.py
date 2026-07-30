@@ -12,23 +12,28 @@ from state_dataset import StateDataset, load_annotations, validate_annotations
 
 
 def pairwise_metrics(
-    ground_truth: Sequence[str], predicted: Sequence[str]
+    ground_truth: Sequence[Any], predicted: Sequence[Any]
 ) -> dict[str, float | int]:
     if len(ground_truth) != len(predicted):
         raise ValueError("Ground-truth and predicted labels must have equal length")
-    true_positive = false_positive = false_negative = true_negative = 0
-    for first_index in range(len(ground_truth)):
-        for second_index in range(first_index):
-            same_truth = ground_truth[first_index] == ground_truth[second_index]
-            same_prediction = predicted[first_index] == predicted[second_index]
-            if same_truth and same_prediction:
-                true_positive += 1
-            elif same_prediction:
-                false_positive += 1
-            elif same_truth:
-                false_negative += 1
-            else:
-                true_negative += 1
+    truth_counts = Counter(ground_truth)
+    prediction_counts = Counter(predicted)
+    joint_counts = Counter(zip(ground_truth, predicted, strict=True))
+
+    def pair_count(count: int) -> int:
+        return count * (count - 1) // 2
+
+    true_positive = sum(pair_count(count) for count in joint_counts.values())
+    predicted_positive = sum(
+        pair_count(count) for count in prediction_counts.values()
+    )
+    actual_positive = sum(pair_count(count) for count in truth_counts.values())
+    total_pairs = pair_count(len(ground_truth))
+    false_positive = predicted_positive - true_positive
+    false_negative = actual_positive - true_positive
+    true_negative = (
+        total_pairs - true_positive - false_positive - false_negative
+    )
     precision = (
         true_positive / (true_positive + false_positive)
         if true_positive + false_positive
