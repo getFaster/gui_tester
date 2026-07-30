@@ -60,9 +60,7 @@ def _write_json(path: Path, value: object) -> None:
     os.replace(temporary_path, path)
 
 
-def extract_perceptual_hashes(
-    dataset: StateDataset, output_dir: Path
-) -> Path:
+def extract_perceptual_hashes(dataset: StateDataset, output_dir: Path) -> Path:
     output_path = output_dir / "perceptual_hashes.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(output_path.name + ".tmp")
@@ -130,9 +128,11 @@ def extract_dino_features(
         }
         if element_finder is not None:
             grounded_features = element_finder.model(features)
-            payload["patch_features"] = grounded_features[
-                :, element_finder.num_special_tokens :
-            ].squeeze(0).cpu()
+            payload["patch_features"] = (
+                grounded_features[:, element_finder.num_special_tokens :]
+                .squeeze(0)
+                .cpu()
+            )
             payload["element_logits"] = element_finder(features).squeeze(0).cpu()
         _atomic_torch_save(payload, feature_dir / f"{observation_id}.pt")
 
