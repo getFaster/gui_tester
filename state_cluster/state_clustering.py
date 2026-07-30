@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from state_dataset import StateDataset, read_jsonl
 from state_features import hamming_distance
 
-
 ELEMENT_CLASS_NAMES = ("clickable", "scrollable")
 
 
@@ -183,9 +182,11 @@ def grounding_embedding(payload: dict[str, Any]) -> torch.Tensor:
         grid[row_midpoint:, column_midpoint:],
     )
     quadrant_means = [
-        quadrant.reshape(-1, patch_features.shape[-1]).mean(dim=0)
-        if quadrant.numel()
-        else torch.zeros(patch_features.shape[-1])
+        (
+            quadrant.reshape(-1, patch_features.shape[-1]).mean(dim=0)
+            if quadrant.numel()
+            else torch.zeros(patch_features.shape[-1])
+        )
         for quadrant in quadrants
     ]
     return torch.cat(
@@ -212,8 +213,7 @@ def _prepare_element_payload(
     if (
         not isinstance(element_logits, torch.Tensor)
         or element_logits.ndim != 2
-        or element_logits.shape
-        != (patch_features.shape[0], len(ELEMENT_CLASS_NAMES))
+        or element_logits.shape != (patch_features.shape[0], len(ELEMENT_CLASS_NAMES))
     ):
         raise ValueError(
             "element_logits must have shape "
@@ -238,9 +238,7 @@ def _prepare_element_payload(
         patch_features.to(device=device, dtype=torch.float32),
         dim=1,
     )
-    probabilities = torch.sigmoid(
-        element_logits.to(device=device, dtype=torch.float32)
-    )
+    probabilities = torch.sigmoid(element_logits.to(device=device, dtype=torch.float32))
     return normalized_features, probabilities
 
 
@@ -260,6 +258,7 @@ def _raw_element_matching_scores(
     if first_features.shape[1] != second_features.shape[1]:
         raise ValueError("Tile embedding dimensions must match")
 
+    # Calculate the maximum weighted similarity in chunks to avoid OOM on large screens.
     first_maxima = torch.zeros_like(first_probabilities)
     second_maxima = torch.zeros_like(second_probabilities)
     for first_start in range(0, first_features.shape[0], tile_chunk_size):
@@ -268,12 +267,9 @@ def _raw_element_matching_scores(
         first_probability_chunk = first_probabilities[first_start:first_end]
         for second_start in range(0, second_features.shape[0], tile_chunk_size):
             second_end = second_start + tile_chunk_size
-            second_probability_chunk = second_probabilities[
-                second_start:second_end
-            ]
+            second_probability_chunk = second_probabilities[second_start:second_end]
             cosine_similarity = (
-                first_feature_chunk
-                @ second_features[second_start:second_end].T
+                first_feature_chunk @ second_features[second_start:second_end].T
             ).clamp_min(0)
             for class_index in range(len(ELEMENT_CLASS_NAMES)):
                 weighted_similarity = (
@@ -281,23 +277,19 @@ def _raw_element_matching_scores(
                     * first_probability_chunk[:, class_index, None]
                     * second_probability_chunk[None, :, class_index]
                 )
-                first_maxima[
-                    first_start:first_end, class_index
-                ] = torch.maximum(
+                first_maxima[first_start:first_end, class_index] = torch.maximum(
                     first_maxima[first_start:first_end, class_index],
                     weighted_similarity.max(dim=1).values,
                 )
-                second_maxima[
-                    second_start:second_end, class_index
-                ] = torch.maximum(
+                second_maxima[second_start:second_end, class_index] = torch.maximum(
                     second_maxima[second_start:second_end, class_index],
                     weighted_similarity.max(dim=0).values,
                 )
 
     epsilon = torch.finfo(first_probabilities.dtype).eps
-    first_directed = first_maxima.sum(dim=0) / first_probabilities.sum(
-        dim=0
-    ).clamp_min(epsilon)
+    first_directed = first_maxima.sum(dim=0) / first_probabilities.sum(dim=0).clamp_min(
+        epsilon
+    )
     second_directed = second_maxima.sum(dim=0) / second_probabilities.sum(
         dim=0
     ).clamp_min(epsilon)
@@ -310,7 +302,7 @@ def element_matching_distance_matrix(
     *,
     class_weights: Sequence[float] = (1.0, 1.0),
     device: torch.device | str = "cpu",
-    tile_chunk_size: int = 512,
+    tile_chunk_size: int = 8192,
 ) -> torch.Tensor:
     """Build exact pairwise screen distances from probability-weighted tile matches."""
     if len(class_weights) != len(ELEMENT_CLASS_NAMES):
@@ -330,9 +322,7 @@ def element_matching_distance_matrix(
         _prepare_element_payload(payload, similarity_device) for payload in payloads
     ]
     observation_count = len(prepared)
-    distances = torch.zeros(
-        (observation_count, observation_count), dtype=torch.float32
-    )
+    distances = torch.zeros((observation_count, observation_count), dtype=torch.float32)
     if observation_count < 2:
         return distances
 
@@ -358,9 +348,8 @@ def element_matching_distance_matrix(
             ).clamp_min(epsilon)
             class_similarities = (cross_score / normalization).clamp(0, 1)
             similarity = (
-                (class_similarities * device_weights).sum()
-                / device_weights.sum()
-            )
+                class_similarities * device_weights
+            ).sum() / device_weights.sum()
             distance = (1 - similarity).clamp(0, 1).cpu()
             distances[first_index, second_index] = distance
             distances[second_index, first_index] = distance
@@ -393,9 +382,7 @@ def transition_embeddings(
             neighbor_mean = torch.zeros_like(base_embeddings[observation_id])
         event_histogram = torch.zeros(len(event_types), dtype=torch.float32)
         for transition in outgoing:
-            event_type = str(
-                transition.get("event", {}).get("event_type", "unknown")
-            )
+            event_type = str(transition.get("event", {}).get("event_type", "unknown"))
             event_histogram[event_index[event_type]] += 1
         if outgoing:
             event_histogram /= len(outgoing)
@@ -479,7 +466,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="Torch device for tile matching (default: CUDA when available).",
     )
-    parser.add_argument("--tile-chunk-size", type=int, default=512)
+    parser.add_argument(
+        "--tile-chunk-size",
+        type=int,
+        default=8192,
+        help="Size of a chunk of tiles to process at a time.",
+    )
     return parser.parse_args(argv)
 
 
@@ -569,12 +561,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 distance_threshold=args.distance_threshold,
             )
 
-    output_path = (
-        args.output_dir
-        / dataset.run_id
-        / "annotations"
-        / f"{baseline}.jsonl"
-    )
+    output_path = args.output_dir / dataset.run_id / "annotations" / f"{baseline}.jsonl"
     write_assignments(output_path, dataset, baseline, labels)
     cluster_count = len(set(labels))
     print(
