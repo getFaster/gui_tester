@@ -6,10 +6,11 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import torch
 import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
 from .state_dataset import StateDataset, read_jsonl
 from .state_features import hamming_distance
@@ -242,13 +243,15 @@ def _prepare_element_payload(
     return normalized_features, probabilities
 
 
-def _raw_element_matching_scores(
+ElementMatchMethod = Literal["best", "hungarian"]
+
+
+def _validate_element_match_inputs(
     first: tuple[torch.Tensor, torch.Tensor],
     second: tuple[torch.Tensor, torch.Tensor],
     *,
     tile_chunk_size: int,
-) -> torch.Tensor:
-    """Return one symmetric bidirectional best-match score per element class."""
+) -> None:
     if tile_chunk_size < 1:
         raise ValueError("tile_chunk_size must be positive")
     first_features, first_probabilities = first
@@ -257,6 +260,18 @@ def _raw_element_matching_scores(
         raise ValueError("Both screens must be on the same similarity device")
     if first_features.shape[1] != second_features.shape[1]:
         raise ValueError("Tile embedding dimensions must match")
+
+
+def _raw_best_element_matching_scores(
+    first: tuple[torch.Tensor, torch.Tensor],
+    second: tuple[torch.Tensor, torch.Tensor],
+    *,
+    tile_chunk_size: int,
+) -> torch.Tensor:
+    """Return one symmetric bidirectional best-match score per element class."""
+    _validate_element_match_inputs(first, second, tile_chunk_size=tile_chunk_size)
+    first_features, first_probabilities = first
+    second_features, second_probabilities = second
 
     # Calculate the maximum weighted similarity in chunks to avoid OOM on large screens.
     first_maxima = torch.zeros_like(first_probabilities)
@@ -296,6 +311,54 @@ def _raw_element_matching_scores(
     return (first_directed + second_directed) / 2
 
 
+def _raw_hungarian_element_matching_scores(
+    first: tuple[torch.Tensor, torch.Tensor],
+    second: tuple[torch.Tensor, torch.Tensor],
+    *,
+    tile_chunk_size: int,
+) -> torch.Tensor:
+    """Return one maximum one-to-one assignment score per element class."""
+    _validate_element_match_inputs(first, second, tile_chunk_size=tile_chunk_size)
+    first_features, first_probabilities = first
+    second_features, second_probabilities = second
+    scores: list[float] = []
+    for class_index in range(len(ELEMENT_CLASS_NAMES)):
+        score_matrix = torch.empty(
+            (first_features.shape[0], second_features.shape[0]),
+            dtype=torch.float32,
+            device="cpu",
+        )
+        for first_start in range(0, first_features.shape[0], tile_chunk_size):
+            first_end = first_start + tile_chunk_size
+            first_feature_chunk = first_features[first_start:first_end]
+            first_probability_chunk = first_probabilities[
+                first_start:first_end, class_index
+            ]
+            for second_start in range(0, second_features.shape[0], tile_chunk_size):
+                second_end = second_start + tile_chunk_size
+                second_probability_chunk = second_probabilities[
+                    second_start:second_end, class_index
+                ]
+                weighted_similarity = (
+                    (
+                        first_feature_chunk @ second_features[second_start:second_end].T
+                    ).clamp_min(0)
+                    * first_probability_chunk[:, None]
+                    * second_probability_chunk[None, :]
+                )
+                score_matrix[
+                    first_start:first_end,
+                    second_start:second_end,
+                ] = weighted_similarity.cpu()
+
+        row_indices, column_indices = linear_sum_assignment(
+            score_matrix.numpy(),
+            maximize=True,
+        )
+        scores.append(score_matrix[row_indices, column_indices].sum().item())
+    return torch.tensor(scores, dtype=torch.float32, device=first_features.device)
+
+
 @torch.no_grad()
 def element_matching_distance_matrix(
     payloads: Sequence[dict[str, Any]],
@@ -303,6 +366,8 @@ def element_matching_distance_matrix(
     class_weights: Sequence[float] = (1.0, 1.0),
     device: torch.device | str = "cpu",
     tile_chunk_size: int = 8192,
+    match_method: ElementMatchMethod = "best",
+    progress_bar: bool = False,
 ) -> torch.Tensor:
     """Build exact pairwise screen distances from probability-weighted tile matches."""
     if len(class_weights) != len(ELEMENT_CLASS_NAMES):
@@ -316,6 +381,13 @@ def element_matching_distance_matrix(
         raise ValueError("At least one class weight must be positive")
     if tile_chunk_size < 1:
         raise ValueError("tile_chunk_size must be positive")
+    scorers = {
+        "best": _raw_best_element_matching_scores,
+        "hungarian": _raw_hungarian_element_matching_scores,
+    }
+    if match_method not in scorers:
+        raise ValueError("match_method must be one of: " + ", ".join(sorted(scorers)))
+    raw_score = scorers[match_method]
 
     similarity_device = torch.device(device)
     prepared = [
@@ -327,7 +399,7 @@ def element_matching_distance_matrix(
         return distances
 
     self_scores = [
-        _raw_element_matching_scores(
+        raw_score(
             screen,
             screen,
             tile_chunk_size=tile_chunk_size,
@@ -336,9 +408,22 @@ def element_matching_distance_matrix(
     ]
     device_weights = weights.to(similarity_device)
     epsilon = torch.finfo(torch.float32).eps
-    for first_index, first in enumerate(prepared):
+    if progress_bar:
+        try:
+            from tqdm import tqdm
+
+            first_iter = tqdm(
+                enumerate(prepared),
+                desc="Element matching distance matrix",
+                unit="screen",
+            )
+        except ImportError:
+            first_iter = enumerate(prepared)
+    else:
+        first_iter = enumerate(prepared)
+    for first_index, first in first_iter:
         for second_index in range(first_index):
-            cross_score = _raw_element_matching_scores(
+            cross_score = raw_score(
                 first,
                 prepared[second_index],
                 tile_chunk_size=tile_chunk_size,
@@ -472,6 +557,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=8192,
         help="Size of a chunk of tiles to process at a time.",
     )
+    parser.add_argument(
+        "--element-match-method",
+        choices=("best", "hungarian"),
+        default="best",
+        help="Tile matching method for the element_matching baseline.",
+    )
     return parser.parse_args(argv)
 
 
@@ -529,6 +620,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 ),
                 device=resolve_similarity_device(args.similarity_device),
                 tile_chunk_size=args.tile_chunk_size,
+                match_method=args.element_match_method,
             )
             labels = distance_matrix_clusters(
                 distances,

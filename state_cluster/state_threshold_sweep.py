@@ -433,11 +433,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("reference", type=Path)
     parser.add_argument("deduplication", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
-    parser.add_argument("--default-threshold", type=float, default=0.15)
+    parser.add_argument("--default-threshold", type=float, default=0.01)
     parser.add_argument("--clickable-weight", type=float, default=1.0)
     parser.add_argument("--scrollable-weight", type=float, default=1.0)
     parser.add_argument("--similarity-device", default="auto")
-    parser.add_argument("--tile-chunk-size", type=int, default=512)
+    parser.add_argument("--tile-chunk-size", type=int, default=8196)
+    parser.add_argument(
+        "--match-method", choices=("hungarian", "best"), default="hungarian"
+    )
     return parser.parse_args(argv)
 
 
@@ -454,6 +457,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         class_weights=(args.clickable_weight, args.scrollable_weight),
         device=resolve_similarity_device(args.similarity_device),
         tile_chunk_size=args.tile_chunk_size,
+        match_method=args.match_method,
+        progress_bar=True,
     )
     clusterings = exhaustive_average_linkage_clusterings(distances)
     reference_ids = {record["observation_id"] for record in reference}

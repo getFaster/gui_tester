@@ -67,6 +67,69 @@ class ElementMatchingTest(unittest.TestCase):
         torch.testing.assert_close(chunked.diagonal(), torch.zeros(3))
         self.assertTrue(((chunked >= 0) & (chunked <= 1)).all())
 
+    def test_hungarian_distance_matrix_is_symmetric_bounded_and_chunk_exact(
+        self,
+    ) -> None:
+        payloads = [
+            make_grounding_payload(
+                [[1.0, 0.0], [0.0, 1.0]],
+                [0.9, 0.2],
+                [0.1, 0.8],
+            ),
+            make_grounding_payload(
+                [[0.99, 0.01], [0.1, 0.9]],
+                [0.8, 0.3],
+                [0.2, 0.7],
+            ),
+            make_grounding_payload(
+                [[-1.0, 0.0]],
+                [0.9],
+                [0.9],
+            ),
+        ]
+
+        unchunked = element_matching_distance_matrix(
+            payloads,
+            device="cpu",
+            tile_chunk_size=10,
+            match_method="hungarian",
+        )
+        chunked = element_matching_distance_matrix(
+            payloads,
+            device="cpu",
+            tile_chunk_size=1,
+            match_method="hungarian",
+        )
+
+        torch.testing.assert_close(chunked, unchunked)
+        torch.testing.assert_close(chunked, chunked.T)
+        torch.testing.assert_close(chunked.diagonal(), torch.zeros(3))
+        self.assertTrue(((chunked >= 0) & (chunked <= 1)).all())
+
+    def test_hungarian_assignment_does_not_reuse_best_tile(self) -> None:
+        first = make_grounding_payload(
+            [[1.0, 0.0], [1.0, 0.0]],
+            [0.9, 0.9],
+            [0.9, 0.9],
+        )
+        second = make_grounding_payload(
+            [[1.0, 0.0]],
+            [0.9],
+            [0.9],
+        )
+
+        best_distance = element_matching_distance_matrix(
+            [first, second],
+            match_method="best",
+        )[0, 1]
+        hungarian_distance = element_matching_distance_matrix(
+            [first, second],
+            match_method="hungarian",
+        )[0, 1]
+
+        self.assertEqual(0.0, best_distance.item())
+        self.assertGreater(hungarian_distance.item(), best_distance.item())
+
     def test_high_confidence_unmatched_tile_increases_distance(self) -> None:
         counterpart = make_grounding_payload(
             [[1.0, 0.0]],
@@ -158,6 +221,11 @@ class ElementMatchingTest(unittest.TestCase):
                 [payload],
                 class_weights=(0.0, 0.0),
             )
+        with self.assertRaisesRegex(ValueError, "match_method"):
+            element_matching_distance_matrix(
+                [payload],
+                match_method="unknown",
+            )
 
     def test_precomputed_average_link_clustering(self) -> None:
         labels = distance_matrix_clusters(
@@ -190,6 +258,8 @@ class ElementMatchingTest(unittest.TestCase):
                 "cpu",
                 "--tile-chunk-size",
                 "64",
+                "--element-match-method",
+                "hungarian",
             ]
         )
 
@@ -198,6 +268,7 @@ class ElementMatchingTest(unittest.TestCase):
         self.assertEqual(1.0, args.scrollable_weight)
         self.assertEqual("cpu", args.similarity_device)
         self.assertEqual(64, args.tile_chunk_size)
+        self.assertEqual("hungarian", args.element_match_method)
 
     def test_element_matching_cli_writes_ordered_assignments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
