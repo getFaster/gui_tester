@@ -11,8 +11,8 @@ from typing import Any, Sequence
 import torch
 import torch.nn.functional as F
 
-from state_dataset import StateDataset, read_jsonl
-from state_features import hamming_distance
+from .state_dataset import StateDataset, read_jsonl
+from .state_features import hamming_distance
 
 ELEMENT_CLASS_NAMES = ("clickable", "scrollable")
 

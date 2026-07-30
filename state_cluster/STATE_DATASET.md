@@ -47,7 +47,7 @@ group for every screenshot identity, including singletons, and never copies or
 changes the dataset:
 
 ```powershell
-uv run .\state_cluster\state_deduplicate.py `
+uv run python -m state_cluster.state_deduplicate `
   .\droidbot\runs\dataset\run_006 `
   .\state_data\run_006\deduplication.jsonl
 ```
@@ -58,7 +58,7 @@ regenerating it from the same immutable run.
 ## Generate an automatic annotation
 
 ```powershell
-uv run .\state_cluster\state_clustering.py `
+uv run python -m state_cluster.state_clustering `
   .\droidbot\runs\dataset\run_006 `
   --baseline structure_str
 ```
@@ -70,7 +70,7 @@ accept `--feature-dir`; feature caches remain derived data.
 ## Edit a fixed representative view
 
 ```powershell
-uv run streamlit run .\state_cluster\state_annotation_app.py -- `
+uv run streamlit run .\state_annotation_app.py -- `
   --run-dir .\droidbot\runs\dataset\run_006 `
   --annotations .\state_data\run_006\annotations\structure_str.jsonl `
   --deduplication .\state_data\run_006\deduplication.jsonl `
@@ -95,7 +95,7 @@ workflow stages.
 ## Benchmark the corrected annotation
 
 ```powershell
-uv run .\state_cluster\state_benchmark.py `
+uv run python -m state_cluster.state_benchmark `
   .\droidbot\runs\dataset\run_006 `
   .\state_data\run_006\annotations\structure_str.jsonl `
   .\state_data\run_006\annotations\wikipedia.jsonl
@@ -110,7 +110,7 @@ First extract grounding features only for the first observation in every exact
 screenshot group:
 
 ```powershell
-uv run .\state_cluster\state_features.py `
+uv run python -m state_cluster.state_features `
   .\droidbot\runs\dataset\run_006 `
   --extractor grounding `
   --deduplication .\state_data\run_006\deduplication.jsonl
@@ -121,7 +121,7 @@ element-matching distance matrix once, builds one complete average-linkage
 tree, and evaluates every threshold that produces a distinct clustering.
 
 ```powershell
-uv run .\state_cluster\state_threshold_sweep.py `
+uv run python -m state_cluster.state_threshold_sweep `
   .\droidbot\runs\dataset\run_006 `
   .\state_features\run_006\grounding `
   .\state_data\run_006\annotations\final_annotation.jsonl `
@@ -164,7 +164,6 @@ raw run with the command above. Keep useful review logs only under
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-$env:PYTHONPATH = "state_cluster;element_finder"
 uv run python -m unittest discover -s tests -v
 uv run python -m compileall state_cluster tests
 ```

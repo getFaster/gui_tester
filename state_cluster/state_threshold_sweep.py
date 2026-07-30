@@ -12,14 +12,14 @@ from typing import Any, Sequence
 
 import torch
 
-from state_benchmark import pairwise_metrics
-from state_clustering import (
+from .state_benchmark import pairwise_metrics
+from .state_clustering import (
     element_matching_distance_matrix,
     load_feature_payloads,
     resolve_similarity_device,
 )
-from state_dataset import StateDataset, load_annotations
-from state_deduplicate import load_deduplication_groups
+from .state_dataset import StateDataset, load_annotations
+from .state_deduplicate import load_deduplication_groups
 
 METRIC_NAMES = (
     "pairwise_f1",

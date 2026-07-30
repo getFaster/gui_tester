@@ -21,9 +21,9 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize
 from torchvision.utils import save_image
 
-from dinov3 import DINOv3FeatureExtractor
-from element_finder import ElementFinder
-from network import AttentionLayer
+from .dinov3 import DINOv3FeatureExtractor
+from .element_finder import ElementFinder
+from .network import AttentionLayer
 
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}

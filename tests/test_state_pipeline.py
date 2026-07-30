@@ -8,7 +8,7 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 from torchvision.io import ImageReadMode, read_image
 
-from state_annotation_app import (
+from state_cluster.state_annotation_app import (
     CLUSTER_SORT_DICTIONARY,
     _default_reviews_path,
     assign_outliers_to_same_cluster,
@@ -27,19 +27,19 @@ from state_annotation_app import (
     save_cluster_review,
     write_cluster_assignments,
 )
-from state_benchmark import (
+from state_cluster.state_benchmark import (
     evaluate_assignments,
     manual_corrections_required,
     pairwise_metrics,
 )
-from state_clustering import (
+from state_cluster.state_clustering import (
     categorical_clusters,
     embedding_clusters,
     perceptual_hash_clusters,
 )
-from state_dataset import StateDataset, read_jsonl
-from state_deduplicate import create_deduplication_file
-from state_features import difference_hash, hamming_distance
+from state_cluster.state_dataset import StateDataset, read_jsonl
+from state_cluster.state_deduplicate import create_deduplication_file
+from state_cluster.state_features import difference_hash, hamming_distance
 
 
 def run_annotation_app_for_test(
@@ -50,7 +50,7 @@ def run_annotation_app_for_test(
     output_path: str,
 ) -> None:
     """Run the annotation app with isolated test output paths."""
-    from state_annotation_app import main
+    from state_cluster.state_annotation_app import main
 
     main(
         [

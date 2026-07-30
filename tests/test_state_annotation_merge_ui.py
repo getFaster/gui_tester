@@ -6,8 +6,8 @@ from pathlib import Path
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
-from state_dataset import read_jsonl
-from state_deduplicate import create_deduplication_file
+from state_cluster.state_dataset import read_jsonl
+from state_cluster.state_deduplicate import create_deduplication_file
 
 
 def run_annotation_app(
@@ -18,7 +18,7 @@ def run_annotation_app(
     reviews_path: str,
 ) -> None:
     """Run the canonical annotation workflow in an isolated AppTest."""
-    from state_annotation_app import main
+    from state_cluster.state_annotation_app import main
 
     main(
         [

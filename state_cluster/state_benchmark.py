@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from state_dataset import StateDataset, load_annotations, validate_annotations
+from .state_dataset import StateDataset, load_annotations, validate_annotations
 
 
 def pairwise_metrics(

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from network import Encoder, DynamicTanh, SwiGLU
+from .network import Encoder, DynamicTanh, SwiGLU
 
 
 class ElementFinder(nn.Module):

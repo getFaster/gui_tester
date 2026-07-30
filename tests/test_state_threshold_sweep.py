@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from state_threshold_sweep import (
+from state_cluster.state_threshold_sweep import (
     best_row,
     deduplicated_observation_ids,
     evaluate_clusterings,

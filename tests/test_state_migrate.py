@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from state_dataset import StateDataset, read_jsonl
-from state_migrate import (
+from state_cluster.state_dataset import StateDataset, read_jsonl
+from state_cluster.state_migrate import (
     convert_legacy_annotation,
     migrate_legacy_annotation_in_place,
 )

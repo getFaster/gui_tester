@@ -18,9 +18,9 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
-from amex_dataset import AmexDataset, ProccessedDataset
-from element_finder import ElementFinder
-from train import parse_args, validate
+from .amex_dataset import AmexDataset, ProccessedDataset
+from .element_finder import ElementFinder
+from .train import parse_args, validate
 
 
 @torch.no_grad()

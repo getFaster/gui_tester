@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PIL import Image, PngImagePlugin
 
-from state_dataset import StateDataset, read_jsonl
-from state_deduplicate import (
+from state_cluster.state_dataset import StateDataset, read_jsonl
+from state_cluster.state_deduplicate import (
     DEDUP_SCOPE_GLOBAL,
     DEDUP_SCOPE_WITHIN_CLUSTER,
     build_deduplication_groups,

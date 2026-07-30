@@ -5,13 +5,13 @@ from pathlib import Path
 
 import torch
 
-from state_clustering import (
+from state_cluster.state_clustering import (
     distance_matrix_clusters,
     element_matching_distance_matrix,
     main,
     parse_args,
 )
-from state_dataset import read_jsonl
+from state_cluster.state_dataset import read_jsonl
 
 
 def make_grounding_payload(

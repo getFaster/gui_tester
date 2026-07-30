@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 from typing import Any, Sequence
 
-from state_dataset import StateDataset, read_jsonl, validate_annotations
-from state_deduplicate import create_deduplication_file
+from .state_dataset import StateDataset, read_jsonl, validate_annotations
+from .state_deduplicate import create_deduplication_file
 
 
 def _atomic_write_jsonl(

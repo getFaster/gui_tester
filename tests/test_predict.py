@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from predict import best_f1_operating_point, collect_predictions
+from element_finder.predict import best_f1_operating_point, collect_predictions
 
 
 class RecordingModel(torch.nn.Module):

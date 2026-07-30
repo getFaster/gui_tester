@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from train import batch_loss
+from element_finder.train import batch_loss
 
 
 class RecordingModel(torch.nn.Module):

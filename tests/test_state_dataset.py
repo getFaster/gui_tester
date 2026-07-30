@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from state_dataset import StateDataset, validate_annotations
+from state_cluster.state_dataset import StateDataset, validate_annotations
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:

@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 from torchvision.io import ImageReadMode, read_image
 
-from state_dataset import StateDataset, read_jsonl
+from .state_dataset import StateDataset, read_jsonl
 
 
 DEDUP_SCOPE_WITHIN_CLUSTER = "within-cluster"

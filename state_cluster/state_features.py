@@ -13,9 +13,9 @@ from torchvision.io import ImageReadMode, read_image
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import rgb_to_grayscale, resize
 
-from dinov3 import DINOv3FeatureExtractor
-from state_dataset import StateDataset
-from state_deduplicate import load_deduplication_groups
+from element_finder.dinov3 import DINOv3FeatureExtractor
+from .state_dataset import StateDataset
+from .state_deduplicate import load_deduplication_groups
 
 
 def difference_hash(image: torch.Tensor) -> str:
@@ -95,7 +95,7 @@ def extract_dino_features(
     element_finder = None
     extractor_name = "dino_global"
     if grounding_checkpoint is not None:
-        from pipeline import load_element_finder
+        from element_finder.pipeline import load_element_finder
 
         element_finder = load_element_finder(
             grounding_checkpoint,

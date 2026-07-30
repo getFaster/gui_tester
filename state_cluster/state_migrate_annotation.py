@@ -6,8 +6,8 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from state_dataset import StateDataset
-from state_migrate import migrate_legacy_annotation_in_place
+from .state_dataset import StateDataset
+from .state_migrate import migrate_legacy_annotation_in_place
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

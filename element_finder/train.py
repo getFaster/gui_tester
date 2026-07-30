@@ -22,8 +22,8 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
-from amex_dataset import AmexDataset, ProccessedDataset
-from element_finder import ElementFinder
+from .amex_dataset import AmexDataset, ProccessedDataset
+from .element_finder import ElementFinder
 
 
 def parse_args() -> argparse.Namespace:

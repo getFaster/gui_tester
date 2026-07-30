@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from torchvision.io import write_png
 
-from pipeline import (
+from element_finder.pipeline import (
     eager_softcap_attention,
     load_images_from_directory,
     render_probability_overlay,

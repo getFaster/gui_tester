@@ -10,8 +10,8 @@ import warnings
 from pathlib import Path
 from typing import Any, Sequence
 
-from state_dataset import StateDataset, load_annotations, read_jsonl
-from state_deduplicate import (
+from .state_dataset import StateDataset, load_annotations, read_jsonl
+from .state_deduplicate import (
     DEDUP_SCOPE_WITHIN_CLUSTER,
     DEDUP_SCOPES,
     WITHIN_CLUSTER_NOTICE,
